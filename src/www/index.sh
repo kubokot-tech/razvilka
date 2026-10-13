@@ -1,10 +1,12 @@
 #!/bin/sh
 # Веб-морда razvilka: http://<роутер>:98 (логин/пароль — /opt/razvilka/web.users)
 export PATH=/opt/bin:/opt/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin HOME=/opt/root
-FVPN=/opt/razvilka/razvilka.sh
-DIR=/opt/razvilka
-LOG=/opt/var/log/razvilka.log
-LISTS=/opt/razvilka/lists
+# RZ_TEST_* — только для локальных тестов (под lighttpd окружение пустое, берутся пути роутера)
+DIR=${RZ_TEST_DIR:-/opt/razvilka}
+FVPN=${RZ_TEST_FVPN:-$DIR/razvilka.sh}
+LOG=${RZ_TEST_LOG:-/opt/var/log/razvilka.log}
+LISTS=$DIR/lists
+DNS=${RZ_TEST_DNS:-127.0.0.1}
 
 urldecode() {
     awk 'BEGIN{for(i=0;i<256;i++) h[sprintf("%02x",i)]=sprintf("%c",i)}
@@ -14,7 +16,9 @@ urldecode() {
 }
 param() { printf '%s' "$2" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2- | urldecode; }
 esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
-redirect() { printf 'Status: 303 See Other\r\nLocation: /?msg=%s\r\n\r\n' "$1"; exit 0; }
+redirect() { printf 'Status: 303 See Other\r\nLocation: /?msg=%s%s\r\n\r\n' "$1" "${2:+&host=$2#check}"; exit 0; }
+# запись списка без комментария, в нижнем регистре (AS — в верхнем) — для сравнения
+norm() { sed -e 's/#.*//' -e 's/[[:space:]]//g' | tr 'A-Z' 'a-z' | sed 's/^as\([0-9]\)/AS\1/'; }
 
 # ---------- действия (POST) ----------
 if [ "$REQUEST_METHOD" = POST ]; then
@@ -31,6 +35,27 @@ if [ "$REQUEST_METHOD" = POST ]; then
         killtest)     $FVPN killtest 3 >/dev/null 2>&1; redirect killtest ;;
         killtest_off) $FVPN killtest off >/dev/null 2>&1; redirect killtest_off ;;
         vpn_restart)  $FVPN vpn-restart >/dev/null 2>&1; redirect vpn_restart ;;
+        add_entry)
+            l=$(param list "$body")
+            case "$l" in isp) f=$LISTS/direct.list; o=$LISTS/vpn.list ;; vpn) f=$LISTS/vpn.list; o=$LISTS/direct.list ;; *) redirect unknown ;; esac
+            back=$(param host "$body" | tr -cd 'A-Za-z0-9.-' | head -c 253)
+            e=$(param entry "$body" | norm | head -c 253)
+            echo "$e" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$|^AS[0-9]{1,10}$|^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]*[a-z][a-z0-9-]*$' || redirect badentry "$back"
+            moved=
+            # из другого списка убираем (перенос), в нужный — дописываем, если ещё нет
+            if grep -q . "$o" 2>/dev/null; then
+                cp -p "$o" "$o.bak"
+                while IFS= read -r line; do [ "$(echo "$line" | norm)" = "$e" ] && moved=1 || printf '%s\n' "$line"; done < "$o.bak" > "$o.new" && mv "$o.new" "$o"
+                [ -n "$moved" ] || cp -p "$o.bak" "$o"
+            fi
+            have=; while IFS= read -r line; do [ "$(echo "$line" | norm)" = "$e" ] && have=1; done < "$f"
+            if [ -z "$have" ]; then
+                cp -p "$f" "$f.bak" 2>/dev/null
+                printf '%s  # добавлено из проверки %s, %s\n' "$e" "${back:-—}" "$(date +%F)" >> "$f"
+            fi
+            $FVPN lists >/dev/null 2>&1
+            printf '%s|%s|%s|%s\n' "$e" "$l" "${moved:-}" "${have:-}" > "$DIR/last_add"
+            redirect added "$back" ;;
         save_list)
             l=$(param list "$body")
             case "$l" in isp) f=$LISTS/direct.list ;; vpn) f=$LISTS/vpn.list ;; *) redirect unknown ;; esac
@@ -76,6 +101,12 @@ case "$msg" in
     updated) m="Список российских сетей обновлён." ;; killtest) m="Заглушка включена на 3 минуты. Откройте любой http-сайт, например http://neverssl.com" ;;
     killtest_off) m="Тест заглушки остановлен." ;; vpn_restart) m="VPN перезапущен." ;;
     contact) m="Контакт сохранён, заглушка обновлена." ;;
+    added) IFS='|' read -r ae al am ah < "$DIR/last_add" 2>/dev/null
+           [ "$al" = isp ] && aln="всегда напрямую" || aln="всегда через VPN"
+           [ "$al" = isp ] && oln="всегда через VPN" || oln="всегда напрямую"
+           if [ -n "$ah" ]; then m="$ae уже был в списке «$aln»."; else m="$ae добавлен в «$aln» и применён."; fi
+           [ -n "$am" ] && m="$m Из списка «$oln» убран." ;;
+    badentry) m="Эту запись нельзя добавить в список." ;;
     saved) ln=$(cat "$DIR/last_save_list" 2>/dev/null)
            m="Список «$([ "$ln" = isp ] && echo "всегда напрямую" || echo "всегда через VPN")» сохранён и применён."
            [ -s "$DIR/last_save.txt" ] && m="$m Не распознаны и отброшены: $(tr '\n' ' ' < "$DIR/last_save.txt")" ;;
@@ -248,6 +279,13 @@ main{padding:28px 24px 48px}
 .chip.isp{color:var(--isp);background:var(--ispb);border-color:transparent;font-weight:600}
 .chip.vpn{color:var(--vpn);background:var(--vpnb);border-color:transparent;font-weight:600}
 .chip.mut{color:var(--mut)}
+.addmsg{margin-top:12px;padding:10px 14px;border-radius:12px;background:var(--accs);color:var(--fg);font-size:14px;font-weight:600}
+.adds{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.addf{display:inline}
+.mini{font:600 12.5px/1.2 inherit;min-height:32px;padding:6px 12px;border-radius:999px;cursor:pointer;border:1px solid transparent}
+.mini.isp{color:var(--isp);background:var(--ispb)}.mini.vpn{color:var(--vpn);background:var(--vpnb)}
+.mini:hover{filter:brightness(.96)}.mini:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.addd{margin-top:8px}.addd summary{cursor:pointer;font-size:13px;color:var(--acc);font-weight:600;list-style:none}
+.addd summary::-webkit-details-marker{display:none}.addd summary::before{content:"+ "}.addd[open] summary::before{content:"− "}
 </style></head><body><main>
 <header class="top">
 <div class="logo" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="40" height="40" aria-hidden="true" focusable="false"><defs><linearGradient id="rzv-mark-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6359f0"/><stop offset="1" stop-color="#3a2fc2"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#rzv-mark-bg)"/><g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"><path d="M32 39 C32 29 19 28 19 15 M12.5 20.5 L19 14 L25.5 20.5" stroke="#4fd3b5"/><path d="M32 39 C32 29 45 28 45 15 M38.5 20.5 L45 14 L51.5 20.5" stroke="#cbbcff"/><path d="M32 53 V39" stroke="#fff"/></g><circle cx="32" cy="39" r="5.5" fill="#fff"/></svg></div>
@@ -294,14 +332,15 @@ $(if [ "$S_killtest" = 1 ]; then echo '<form method="post"><button class="pri" n
 </div>
 </section>
 
-<section class="card check">
+<section class="card check" id="check">
 <h2><span class="b" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg></span>Куда пойдёт сайт</h2>
 <form method="get" class="row"><input name="host" aria-label="Домен или IP" placeholder="kion.ru или 1.2.3.4" value="$host" autocapitalize="off" autocorrect="off" spellcheck="false"><button class="pri">Проверить</button></form>
 EOF
 if [ -n "$host" ]; then
     # dig, а не nslookup: busybox nslookup дописывает после IP имя из PTR-записи
     if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then ips=$host; isip=1; else
-    ips=$(dig +short +time=3 +tries=1 "$host" A @127.0.0.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | sort -u); isip=; fi
+    ips=$(dig +short +time=3 +tries=1 "$host" A @$DNS 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | sort -u); isip=; fi
+    case "$msg" in added|badentry) printf '<div class="addmsg">%s</div>\n' "$(printf '%s' "$m" | esc)" ;; esac
     echo '<div class="res">'
     if [ -z "$ips" ]; then
         echo "<p class=\"rsum\">Не удалось найти адрес <b>$host</b></p>"
@@ -314,6 +353,8 @@ if [ -n "$host" ]; then
                 sed -e 's/#.*//' -e 's/[[:space:]]//g' "$f" 2>/dev/null | grep -qixF "$host" && inl="$inl $l"
             done
         fi
+        # кнопка «добавить запись в список» (POST, после — назад к этой же проверке)
+        addbtn() { printf '<form method="post" class="addf"><input type="hidden" name="action" value="add_entry"><input type="hidden" name="list" value="%s"><input type="hidden" name="entry" value="%s"><input type="hidden" name="host" value="%s"><button class="mini %s">%s</button></form>' "$1" "$2" "$host" "$1" "$3"; }
         rows=; nv=0; nd=0
         for ip in $ips; do
             lk=$($FVPN lookup "$ip" 2>/dev/null)
@@ -337,7 +378,9 @@ if [ -n "$host" ]; then
             [ -n "$md" ] && [ -n "$mv" ] && chips="$chips<span class=\"chip mut\">есть в обоих — «напрямую» важнее</span>"
             [ "$(g ru)" = 1 ] && chips="$chips<span class=\"chip mut\">сеть РФ</span>" || chips="$chips<span class=\"chip mut\">зарубежная сеть</span>"
             as=$(g asn); [ -n "$as" ] && chips="$chips<span class=\"chip mut\">AS$as $(g holder | esc)</span>"
-            rows="$rows<div class=\"ipr\"><div class=\"iph\"><code>$ip</code>$badge</div><div class=\"why\">$why</div><div class=\"chips2\">$chips</div></div>"
+            adds="$(addbtn isp "$ip" "IP $ip → напрямую")$(addbtn vpn "$ip" "IP $ip → через VPN")"
+            [ -n "$as" ] && adds="$adds$(addbtn isp "AS$as" "вся AS$as → напрямую")$(addbtn vpn "AS$as" "вся AS$as → через VPN")"
+            rows="$rows<div class=\"ipr\"><div class=\"iph\"><code>$ip</code>$badge</div><div class=\"why\">$why</div><div class=\"chips2\">$chips</div><details class=\"addd\"><summary>Добавить в список</summary><div class=\"adds\">$adds</div></details></div>"
         done
         n=$((nv+nd))
         if [ "$nv" -gt 0 ] && [ "$nd" -eq 0 ]; then sum="идёт <b class=\"tv\">через VPN</b>"
@@ -352,6 +395,10 @@ if [ -n "$host" ]; then
                 *vpn*)    echo '<p class="rdom">Домен записан в списке <span class="chip vpn">через VPN</span></p>' ;;
                 *)        echo '<p class="rdom mut">Самого домена в ручных списках нет.</p>' ;;
             esac
+            echo "<div class=\"adds\">"
+            case "$inl" in *direct*) ;; *) addbtn isp "$host" "$host → всегда напрямую" ;; esac
+            case "$inl" in *vpn*) ;; *) addbtn vpn "$host" "$host → всегда через VPN" ;; esac
+            echo "</div>"
         fi
         echo "$rows"
     fi
