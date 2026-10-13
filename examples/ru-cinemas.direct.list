@@ -1,0 +1,11 @@
+# Онлайн-кинотеатры — всегда напрямую, чтобы сервис видел российский IP
+AS13238   # Яндекс — Кинопоиск
+AS57629   # Иви
+AS60283   # START
+AS51115   # HLL — KION, Premier, Rutube, 24h.tv
+AS201706  # Servicepipe — Okko, Premier, Rutube
+AS34879   # NGENIX (CCT) — Wink, more.tv
+AS204878  # CCT — Wink, more.tv
+# Amediateka на Amazon CloudFront — AS не добавить (пол-интернета), только домены
+amediateka.ru
+www.amediateka.ru

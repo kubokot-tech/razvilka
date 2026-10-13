@@ -1,0 +1,9 @@
+#!/bin/sh
+# razvilka: маршрутизация (сторож в cron достроит, когда поднимется VPN)
+case "$1" in
+    start)   [ -f /opt/razvilka/enabled ] && /opt/razvilka/razvilka.sh start ;;
+    stop)    /opt/razvilka/razvilka.sh stop ;;
+    restart) /opt/razvilka/razvilka.sh stop; /opt/razvilka/razvilka.sh start ;;
+    status)  /opt/razvilka/razvilka.sh status ;;
+    *) echo "usage: $0 start|stop|restart|status" ;;
+esac
