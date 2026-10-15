@@ -20,7 +20,7 @@
 #   razvilka.sh why IP                из какой записи ручного списка взялся адрес
 #   razvilka.sh lookup IP             всё про адрес: маршрут, списки, РФ ли, чья AS (для веб-морды)
 #   razvilka.sh watchdog              раз в минуту из cron
-#   razvilka.sh mode kill|direct
+#   razvilka.sh mode direct|soft|kill
 #   razvilka.sh killtest N | off      показать заглушку N минут при живом VPN (проверка)
 #   razvilka.sh stub                  пересобрать страницу-заглушку (после смены контакта)
 #   razvilka.sh netfilter             переприменить правила iptables (хук ndm/netfilter.d)
@@ -86,7 +86,36 @@ log() {
     [ "$(wc -c < "$LOG")" -gt 200000 ] && tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 }
 
-failmode() { m=$(cat "$MODE_FILE" 2>/dev/null); [ "$m" = direct ] && echo direct || echo kill; }
+# режим при падении туннеля: direct (всё напрямую) | soft (закрыто, кроме kill-allow) | kill (закрыто всё)
+failmode() { m=$(cat "$MODE_FILE" 2>/dev/null); case "$m" in direct|soft) echo "$m" ;; *) echo kill ;; esac; }
+
+# ---------- мягкий kill: что разрешено напрямую, когда туннель лежит ----------
+ALLOW_LIST=$LISTS/kill-allow.list          # свои записи (домены, IP, подсети, AS)
+ALLOW_PRESETS=$DIR/kill-allow.presets      # включённые наборы, по одному ключу на строку
+ALLOW_DEFAULT="cloudflare akamai fastly jslibs gfonts captcha"
+
+# наборы: ключ|название|записи
+presets() {
+    cat <<'P'
+cloudflare|Cloudflare — CDN многих российских сайтов|AS13335
+akamai|Akamai|AS20940 AS16625
+fastly|Fastly|AS54113
+jslibs|CDN библиотек (cdnjs, jsDelivr, unpkg)|cdnjs.cloudflare.com cdn.jsdelivr.net fastly.jsdelivr.net unpkg.com
+gfonts|Шрифты и библиотеки Google|fonts.googleapis.com fonts.gstatic.com ajax.googleapis.com
+captcha|Капча (reCAPTCHA, hCaptcha)|www.recaptcha.net recaptcha.net www.gstatic.com hcaptcha.com js.hcaptcha.com
+analytics|Аналитика Google|www.google-analytics.com www.googletagmanager.com
+P
+}
+presets_on() { [ -f "$ALLOW_PRESETS" ] && cat "$ALLOW_PRESETS" || echo $ALLOW_DEFAULT | tr ' ' '\n'; }
+
+# записи всех включённых наборов + свои -> allow.resolved (резолвим заранее, пока туннель жив)
+build_allow() {
+    {
+        for k in $(presets_on); do presets | awk -F'|' -v k="$k" '$1==k {print $3}' | tr ' ' '\n'; done
+        [ -f "$ALLOW_LIST" ] && sed -e 's/#.*//' -e 's/[[:space:]]//g' "$ALLOW_LIST" | grep -v '^$'
+    } > "$DIR/allow.src"
+    list_map "$DIR/allow.src" | awk '{print $1}' | sort -u > "$DIR/allow.new" && mv "$DIR/allow.new" "$DIR/allow.resolved"
+}
 
 isp_gw() {
     ip route show table main default | awk -v d="$ISP_IF" '$0 ~ "dev " d {for (i=1;i<NF;i++) if ($i=="via") {print $(i+1); exit}}'
@@ -342,6 +371,9 @@ kill_on() {
     gw=$(isp_gw)
     {
         echo "route replace prohibit default table $TABLE"
+        # мягкий kill: разрешённое (CDN, шрифты, капча, свои записи) — напрямую
+        [ "$(failmode)" = soft ] && [ -n "$gw" ] && [ -f "$DIR/allow.resolved" ] \
+            && awk -v gw="$gw" -v d="$ISP_IF" -v t="$TABLE" '{print "route replace " $1 " via " gw " dev " d " table " t}' "$DIR/allow.resolved"
         # публичные DNS — напрямую: иначе устройства с «зашитым» DNS (Android, Chromecast, ноутбуки)
         # потеряют и российские сайты
         [ -n "$gw" ] && for r in $RESOLVERS; do echo "route replace $r via $gw dev $ISP_IF table $TABLE"; done
@@ -351,15 +383,15 @@ kill_on() {
     ip -batch "$DIR/kill.batch" 2>/dev/null
     rule_on; flush_cache
     captive_on    # повторяем каждую минуту: прошивка могла пересобрать таблицу nat
-    [ -f "$KILL_FLAG" ] || { touch "$KILL_FLAG"; flush_flows; log "KILL SWITCH ВКЛ: зарубежное с устройств закрыто (мгновенный отказ), российское работает"; }
+    [ -f "$KILL_FLAG" ] || { touch "$KILL_FLAG"; flush_flows; log "KILL SWITCH ВКЛ ($([ "$(failmode)" = soft ] && echo "мягкий: CDN, шрифты и т.п. — напрямую" || echo "строгий")): зарубежное с устройств закрыто, российское работает"; }
 }
 kill_off() {
     captive_off
     while ip rule show | grep -q "^$KILL_PRIO:"; do ip rule del priority $KILL_PRIO; done
     if [ -f "$KILL_FLAG" ]; then
         rm -f "$KILL_FLAG"
-        ip route replace default dev $VPN_IF table $TABLE 2>/dev/null
-        for r in $RESOLVERS; do ip route del "$r" table $TABLE 2>/dev/null; done
+        # таблицу 1022 строим заново: так уходят и исключения DNS, и разрешённое мягкого режима
+        build >/dev/null 2>&1 || ip route replace default dev $VPN_IF table $TABLE 2>/dev/null
         [ -f "$ENABLED" ] && build_force >/dev/null 2>&1
         flush_cache; flush_flows
         log "kill switch выкл"
@@ -490,7 +522,7 @@ watchdog() {
     else
         f=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )); echo $f > "$FAILS"
         [ "$f" -ge 2 ] || return 0      # две неудачи подряд (~2 мин)
-        if [ "$(failmode)" = kill ]; then
+        if [ "$(failmode)" != direct ]; then
             [ -f "$KILL_FLAG" ] || log "туннель не отвечает ($f проверки)"
             kill_on   # повторяем каждую минуту: правила могли слететь
         else
@@ -566,6 +598,7 @@ status_kv() {
     echo "lan_ip=$LAN_IP"
     echo "stub_port=$STUB_PORT"
     echo "direct_n=$(count_entries "$DIRECT_LIST")"
+    echo "allow_n=$(wc -l < "$DIR/allow.resolved" 2>/dev/null || echo 0)"
     echo "vpn_n=$(count_entries "$VPN_LIST")"
     echo "force_routes=$(ip route show table $FORCE_TABLE | wc -l)"
     echo "$(cat "$STATE" 2>/dev/null)" | tr ' ' '\n'
@@ -577,7 +610,7 @@ case "$1" in
         legacy_kill_off; guard_on
         [ -f "$DIR/stub/index.html" ] || make_stub
         build_force
-        if tunnel_ok && build; then rule_on; kill_off; log "включено"; else log "включено, жду туннель (сторож достроит)"; fi
+        if tunnel_ok && build; then rule_on; kill_off; build_allow; log "включено"; else log "включено, жду туннель (сторож достроит)"; fi
         ;;
     stop)
         rm -f "$ENABLED" "$TEST_UNTIL"; kill_off; legacy_kill_off; rule_off; guard_off
@@ -591,6 +624,7 @@ case "$1" in
     lists)
         [ "${2:-}" = refresh ] && ASN_REFRESH=1
         [ -f "$ENABLED" ] && build_force
+        tunnel_ok && build_allow
         ;;
     why)
         why "$2"
@@ -598,23 +632,30 @@ case "$1" in
     lookup)
         lookup "$2"
         ;;
+    presets)
+        on=" $(presets_on | tr '\n' ' ') "
+        presets | while IFS='|' read -r k n e; do case "$on" in *" $k "*) c=1 ;; *) c=0 ;; esac; echo "$k|$c|$n|$e"; done
+        ;;
+    allow)
+        build_allow; echo "разрешено при падении туннеля: $(wc -l < "$DIR/allow.resolved") адресов/подсетей"
+        ;;
     watchdog)
         watchdog
         ;;
     mode)
         case "$2" in
-            kill|direct)
+            kill|soft|direct)
                 echo "$2" > "$MODE_FILE"; log "режим при падении VPN: $2"; watchdog ;;
-            *) echo "usage: $0 mode kill|direct"; exit 1 ;;
+            *) echo "usage: $0 mode direct|soft|kill"; exit 1 ;;
         esac
         ;;
     killtest)
         if [ "$2" = off ]; then
-            rm -f "$TEST_UNTIL"; log "тест заглушки остановлен"; watchdog
+            rm -f "$TEST_UNTIL"; log "тест kill switch остановлен"; watchdog
         else
             min=${2:-3}; case "$min" in ''|*[!0-9]*) min=3 ;; esac; [ "$min" -gt 30 ] && min=30
             echo $(( $(date +%s) + min * 60 )) > "$TEST_UNTIL"
-            log "тест заглушки на $min мин"
+            log "тест kill switch на $min мин"
             kill_on
         fi
         ;;
@@ -637,6 +678,6 @@ case "$1" in
         tail -n 8 "$LOG" 2>/dev/null
         ;;
     *)
-        echo "usage: $0 start|stop|update|lists [refresh]|why IP|watchdog|mode kill|direct|killtest N|off|stub|netfilter|vpn-restart|status"; exit 1
+        echo "usage: $0 start|stop|update|lists [refresh]|why IP|watchdog|mode direct|soft|kill|killtest N|off|stub|netfilter|vpn-restart|status"; exit 1
         ;;
 esac

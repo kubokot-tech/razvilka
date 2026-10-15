@@ -15,6 +15,8 @@ urldecode() {
      printf "%s", o s}'
 }
 param() { printf '%s' "$2" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2- | urldecode; }
+# все значения параметра (галочки): по одному на строку
+params() { printf '%s' "$2" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- | while read -r v; do printf '%s' "$v" | urldecode; echo; done; }
 esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
 redirect() { printf 'Status: 303 See Other\r\nLocation: /?msg=%s%s\r\n\r\n' "$1" "${2:+&host=$2#check}"; exit 0; }
 # запись списка без комментария, в нижнем регистре (AS — в верхнем) — для сравнения
@@ -29,6 +31,7 @@ if [ "$REQUEST_METHOD" = POST ]; then
         start)        $FVPN start >/dev/null 2>&1; redirect started ;;
         stop)         $FVPN stop >/dev/null 2>&1; redirect stopped ;;
         mode_kill)    $FVPN mode kill >/dev/null 2>&1; redirect mode ;;
+        mode_soft)    $FVPN mode soft >/dev/null 2>&1; redirect mode ;;
         mode_direct)  $FVPN mode direct >/dev/null 2>&1; redirect mode ;;
         check)        $FVPN watchdog >/dev/null 2>&1; redirect checked ;;
         update)       $FVPN update >/dev/null 2>&1; redirect updated ;;
@@ -58,7 +61,12 @@ if [ "$REQUEST_METHOD" = POST ]; then
             redirect added "$back" ;;
         save_list)
             l=$(param list "$body")
-            case "$l" in isp) f=$LISTS/direct.list ;; vpn) f=$LISTS/vpn.list ;; *) redirect unknown ;; esac
+            case "$l" in isp) f=$LISTS/direct.list ;; vpn) f=$LISTS/vpn.list ;; allow) f=$LISTS/kill-allow.list ;; *) redirect unknown ;; esac
+            if [ "$l" = allow ]; then   # галочки наборов мягкого kill: только известные ключи
+                known=" $($FVPN presets | cut -d'|' -f1 | tr '\n' ' ') "
+                params preset "$body" | while read -r k; do case "$known" in *" $k "*) echo "$k" ;; esac; done > "$DIR/kill-allow.presets"
+            fi
+            [ -f "$f" ] || : > "$f"
             : > "$DIR/last_save.txt"
             param content "$body" | tr -d '\r' | awk -v bad="$DIR/last_save.txt" '
                 { line=$0; gsub(/^[ \t]+|[ \t]+$/, "", line); cm="" }
@@ -78,7 +86,7 @@ if [ "$REQUEST_METHOD" = POST ]; then
                 { print line > bad }' > "$f.new"
             cp -p "$f" "$f.bak" 2>/dev/null
             mv "$f.new" "$f"
-            $FVPN lists >/dev/null 2>&1
+            if [ "$l" = allow ]; then $FVPN allow >/dev/null 2>&1; else $FVPN lists >/dev/null 2>&1; fi
             echo "$l" > "$DIR/last_save_list"
             redirect saved ;;
         contact)
@@ -108,7 +116,8 @@ case "$msg" in
            [ -n "$am" ] && m="$m Из списка «$oln» убран." ;;
     badentry) m="Эту запись нельзя добавить в список." ;;
     saved) ln=$(cat "$DIR/last_save_list" 2>/dev/null)
-           m="Список «$([ "$ln" = isp ] && echo "всегда напрямую" || echo "всегда через VPN")» сохранён и применён."
+           case "$ln" in isp) lnn="всегда напрямую" ;; vpn) lnn="всегда через VPN" ;; *) lnn="разрешено при падении туннеля" ;; esac
+           m="Список «$lnn» сохранён и применён."
            [ -s "$DIR/last_save.txt" ] && m="$m Не распознаны и отброшены: $(tr '\n' ' ' < "$DIR/last_save.txt")" ;;
     *) m= ;;
 esac
@@ -286,6 +295,11 @@ main{padding:28px 24px 48px}
 .mini:hover{filter:brightness(.96)}.mini:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .addd{margin-top:8px}.addd summary{cursor:pointer;font-size:13px;color:var(--acc);font-weight:600;list-style:none}
 .addd summary::-webkit-details-marker{display:none}.addd summary::before{content:"+ "}.addd[open] summary::before{content:"− "}
+.seg3{grid-template-columns:repeat(3,1fr)}@media (max-width:560px){.seg3{grid-template-columns:1fr}}
+.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin-top:8px}
+.chk{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--card);cursor:pointer}
+.chk input{margin-top:3px;width:18px;height:18px;accent-color:var(--acc);flex:none}
+.chk b{display:block;font-size:14px}.chk small{display:block;color:var(--mut);font-size:12px;overflow-wrap:anywhere}
 </style></head><body><main>
 <header class="top">
 <div class="logo" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="40" height="40" aria-hidden="true" focusable="false"><defs><linearGradient id="rzv-mark-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6359f0"/><stop offset="1" stop-color="#3a2fc2"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#rzv-mark-bg)"/><g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"><path d="M32 39 C32 29 19 28 19 15 M12.5 20.5 L19 14 L25.5 20.5" stroke="#4fd3b5"/><path d="M32 39 C32 29 45 28 45 15 M38.5 20.5 L45 14 L51.5 20.5" stroke="#cbbcff"/><path d="M32 53 V39" stroke="#fff"/></g><circle cx="32" cy="39" r="5.5" fill="#fff"/></svg></div>
@@ -302,7 +316,7 @@ cat <<EOF
 
 <div class="tiles">
 <div class="tile"><span class="k">VPN-туннель</span><span class="v"><i class="led $([ "$S_tunnel" = 1 ] && echo on || echo no)"></i>$([ "$S_tunnel" = 1 ] && echo "жив" || echo "не отвечает")</span>${S_vpn_ip:+<small>$S_vpn_ip</small>}</div>
-<div class="tile"><span class="k">При падении VPN</span><span class="v">$([ "$S_failmode" = kill ] && echo "закрыть зарубежное" || echo "напрямую")</span></div>
+<div class="tile"><span class="k">При падении VPN</span><span class="v">$([ "$S_failmode" = kill ] && echo "строгий kill" || { [ "$S_failmode" = soft ] && echo "мягкий kill" || echo "напрямую"; })</span></div>
 <div class="tile"><span class="k">Сети РФ напрямую</span><span class="v">${S_ru:-0}</span><small>обновлён ${S_ru_date:-—}</small></div>
 <div class="tile"><span class="k">Сервер VPN напрямую</span><span class="v">${S_servers:-—}</span></div>
 <div class="tile"><span class="k">Ручные списки</span><span class="v">${S_direct_n:-0} напрямую · ${S_vpn_n:-0} через VPN</span></div>
@@ -320,13 +334,25 @@ $(if [ "$S_enabled" = 1 ]; then echo '<form method="post"><button class="danger"
 
 <div class="sub">Если VPN упал</div>
 <p class="mut" style="margin:-4px 0 10px">Проверка раз в минуту, срабатывает после 2 неудач подряд.</p>
-<div class="seg" role="group" aria-label="Режим при падении VPN">
-<form method="post"><button class="$([ "$S_failmode" = kill ] && echo sel)" aria-pressed="$([ "$S_failmode" = kill ] && echo true || echo false)" name="action" value="mode_kill"><span>Закрыть зарубежное</span><small>kill switch</small></button></form>
-<form method="post"><button class="$([ "$S_failmode" = direct ] && echo sel)" aria-pressed="$([ "$S_failmode" = direct ] && echo true || echo false)" name="action" value="mode_direct"><span>Пускать напрямую</span><small>с замедлением провайдера</small></button></form>
+<div class="seg seg3" role="group" aria-label="Режим при падении VPN">
+<form method="post"><button class="$([ "$S_failmode" = direct ] && echo sel)" aria-pressed="$([ "$S_failmode" = direct ] && echo true || echo false)" name="action" value="mode_direct"><span>Пускать напрямую</span><small>всё работает, без туннеля</small></button></form>
+<form method="post"><button class="$([ "$S_failmode" = soft ] && echo sel)" aria-pressed="$([ "$S_failmode" = soft ] && echo true || echo false)" name="action" value="mode_soft"><span>Мягкий kill</span><small>закрыто, кроме CDN и т.п.</small></button></form>
+<form method="post"><button class="$([ "$S_failmode" = kill ] && echo sel)" aria-pressed="$([ "$S_failmode" = kill ] && echo true || echo false)" name="action" value="mode_kill"><span>Строгий kill</span><small>закрыто всё зарубежное</small></button></form>
 </div>
 <div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></svg>
-<span>«Закрыть зарубежное» — пока туннель не работает, зарубежное с устройств сразу получает отказ,
-российское работает как обычно. «Пускать напрямую» — зарубежное временно идёт через провайдера.</span></div>
+<span>Пока туннель не работает: «напрямую» — зарубежное идёт через провайдера; «мягкий kill» — зарубежное
+закрыто, кроме отмеченного ниже (CDN, шрифты, капча — без них российские сайты открываются не полностью);
+«строгий kill» — закрыто всё зарубежное. Российское работает всегда.</span></div>
+$(if [ "$S_failmode" = soft ]; then
+  echo '<form method="post" class="allow"><input type="hidden" name="action" value="save_list"><input type="hidden" name="list" value="allow">'
+  echo '<div class="sub" style="margin-top:14px">Разрешено при падении туннеля</div><div class="checks">'
+  $FVPN presets 2>/dev/null | while IFS='|' read -r k c n e; do
+    printf '<label class="chk"><input type="checkbox" name="preset" value="%s"%s><span><b>%s</b><small>%s</small></span></label>\n' "$k" "$([ "$c" = 1 ] && echo ' checked')" "$(printf '%s' "$n" | esc)" "$(printf '%s' "$e" | esc)"
+  done
+  echo '</div><label class="mut" for="allow-own" style="display:block;margin:12px 0 6px">Свои адреса — домены, IP, подсети, AS, по одной записи на строку:</label>'
+  printf '<textarea id="allow-own" name="content" rows="4" spellcheck="false" autocapitalize="off" placeholder="например: static.example.com или AS12345">%s</textarea>\n' "$(cat "$LISTS/kill-allow.list" 2>/dev/null | esc)"
+  echo "<div class=\"inline\" style=\"margin-top:10px\"><button class=\"pri\">Сохранить</button><span class=\"mut\">сейчас разрешено: ${S_allow_n:-0} адресов и подсетей</span></div></form>"
+fi)
 <div class="inline">
 $(if [ "$S_killtest" = 1 ]; then echo '<form method="post"><button class="pri" name="action" value="killtest_off">Остановить тест</button></form>'; else echo '<form method="post"><button name="action" value="killtest">Тест kill switch на 3 минуты</button></form>'; fi)
 </div>

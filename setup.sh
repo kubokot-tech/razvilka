@@ -17,7 +17,7 @@
 #   --vpn-restart CMD   команда перезапуска VPN для кнопки в веб-морде
 #   --web-pass PASS     пароль веб-морды (логин admin); без него — спросит или оставит прежний
 #   --web-port N        порт веб-морды (98)          --stub-port N   порт заглушки (8098)
-#   --contact TEXT      контакт на заглушке           --failmode kill|direct  (direct; kill временно отключён)
+#   --failmode direct|soft|kill  поведение при падении туннеля (direct)
 #   --keep-bird         не удалять Bird4Static/web4static (по умолчанию удаляются: списки переносятся)
 #   --yes               не задавать вопросов
 #
@@ -376,7 +376,7 @@ do_uninstall() {
           /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka /opt/bin/razvilka
     if [ $PURGE = 1 ]; then rm -rf "$DIR"; c_ok "удалено полностью"
     else
-        find "$DIR" -mindepth 1 -maxdepth 1 ! -name lists ! -name contact.txt ! -name web.users ! -name failmode ! -name razvilka.conf -exec rm -rf {} +
+        find "$DIR" -mindepth 1 -maxdepth 1 ! -name lists ! -name contact.txt ! -name web.users ! -name failmode ! -name kill-allow.presets ! -name razvilka.conf -exec rm -rf {} +
         c_ok "удалено; списки и настройки оставлены в $DIR (полностью: uninstall --purge)"
     fi
     c_info "пакеты Entware (ip-full, iptables, lighttpd, ...) не удалялись"
