@@ -96,4 +96,4 @@ grep -E 'KILL SWITCH|туннель не отвечает|туннель жив|
            -e 's/тест kill switch на ([0-9]+) мин/Проверка kill switch на \1 мин/' \
   | tail -n 8 | sed -n '1!G;h;$p' | esc \
   | awk '{ printf "<li><time>%s %s</time>", substr($1,9,2) "." substr($1,6,2), substr($2,1,5); $1=""; $2=""; sub(/^  /,""); print $0 "</li>" }'
-echo '</ul><footer>Настройки — <a href="/">панель управления</a> (нужен пароль)</footer></main></body></html>'
+echo '</ul><footer>Настройки — <a href="/admin">панель управления</a> (нужен пароль)</footer></main></body></html>'

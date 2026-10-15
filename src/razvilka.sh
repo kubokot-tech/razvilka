@@ -40,6 +40,8 @@ STUB_PORT=8098
 WEB_PORT=98
 VPN_SERVERS_EXTRA=""     # адреса VPN-сервера вручную, если не определяются сами
 VPN_PROCESS=""           # имя процесса VPN-клиента: по его соединениям находится адрес сервера
+ALIAS_IP=""              # отдельный адрес для веб-морды на 80-м порту (http://razvilka.lan)
+HOSTNAME_LAN=""          # имя для него в DNS роутера
 CAPTIVE_STUB=0           # 1 = при kill switch подменять http на зарубежное страницей-заглушкой. ОСТОРОЖНО:
                          # iPhone/Mac принимают её за «вход в сеть» и перестают пускать через Wi‑Fi ВЕСЬ трафик
 VPN_RESTART=""           # команда перезапуска VPN для кнопки в веб-морде
@@ -497,6 +499,10 @@ EOF
 
 # ---------- сторож ----------
 
+# отдельный адрес в домашней сети для http://razvilka.lan (на 80-м порту роутера живёт веб Keenetic)
+alias_on() { [ -n "$ALIAS_IP" ] || return 0; ip -4 addr show br0 | grep -q " $ALIAS_IP/" || ip addr add "$ALIAS_IP/32" dev br0 2>/dev/null; return 0; }
+alias_off() { [ -n "$ALIAS_IP" ] && ip addr del "$ALIAS_IP/32" dev br0 2>/dev/null; return 0; }
+
 # когда туннель последний раз сменил состояние (для страницы статуса): «1|0 <epoch>»
 TUNNEL_STATE=$DIR/tunnel_state
 mark_tunnel() {
@@ -505,6 +511,7 @@ mark_tunnel() {
 }
 
 watchdog() {
+    alias_on     # веб-морда должна быть доступна и при выключенной схеме
     [ -f "$ENABLED" ] || return 0
     guard_on
     force_ok || build_force
@@ -643,6 +650,12 @@ case "$1" in
         ;;
     lookup)
         lookup "$2"
+        ;;
+    alias-on)
+        alias_on
+        ;;
+    alias-off)
+        alias_off
         ;;
     presets)
         on=" $(presets_on | tr '\n' ' ') "

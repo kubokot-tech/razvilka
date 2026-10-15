@@ -17,6 +17,8 @@
 #   --vpn-restart CMD   команда перезапуска VPN для кнопки в веб-морде
 #   --web-pass PASS     пароль веб-морды (логин admin); без него — спросит или оставит прежний
 #   --web-port N        порт веб-морды (98)          --stub-port N   порт заглушки (8098)
+#   --hostname NAME     имя веб-морды в DNS роутера (razvilka.lan), --no-hostname — не создавать
+#   --alias-ip IP       отдельный адрес для неё на 80-м порту (по умолчанию .254 сети, если свободен)
 #   --failmode direct|soft|kill  поведение при падении туннеля (direct)
 #   --keep-bird         не удалять Bird4Static/web4static (по умолчанию удаляются: списки переносятся)
 #   --yes               не задавать вопросов
@@ -38,7 +40,7 @@ c_warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 die()    { printf '\033[1;31m✗ %s\033[0m\n' "$*"; exit 1; }
 
 ACTION=${1:-install}; [ $# -gt 0 ] && shift
-VPN_IF= ; ISP_IF= ; VPN_SERVERS= ; VPN_RESTART= ; VPN_PROCESS= ; WEB_PASS= ; WEB_PORT= ; STUB_PORT=
+VPN_IF= ; ISP_IF= ; VPN_SERVERS= ; VPN_RESTART= ; VPN_PROCESS= ; HOSTNAME_LAN= ; ALIAS_IP= ; WEB_PASS= ; WEB_PORT= ; STUB_PORT=
 CONTACT= ; FAILMODE= ; KEEP_BIRD=0 ; YES=0 ; PURGE=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -47,6 +49,9 @@ while [ $# -gt 0 ]; do
         --vpn-server) VPN_SERVERS="$VPN_SERVERS $2"; shift ;;
         --vpn-restart) VPN_RESTART=$2; shift ;;
         --vpn-process) VPN_PROCESS=$2; shift ;;
+        --hostname) HOSTNAME_LAN=$2; shift ;;
+        --alias-ip) ALIAS_IP=$2; shift ;;
+        --no-hostname) HOSTNAME_LAN=none ;;
         --web-pass) WEB_PASS=$2; shift ;;
         --web-port) WEB_PORT=$2; shift ;;
         --stub-port) STUB_PORT=$2; shift ;;
@@ -308,6 +313,16 @@ do_install() {
     [ -z "$VPN_RESTART" ] && VPN_RESTART=$(old VPN_RESTART)
     [ -z "$VPN_PROCESS" ] && VPN_PROCESS=$(old VPN_PROCESS)
     CAPTIVE_STUB=$(old CAPTIVE_STUB); [ -z "$CAPTIVE_STUB" ] && CAPTIVE_STUB=0
+    [ -z "$HOSTNAME_LAN" ] && HOSTNAME_LAN=$(old HOSTNAME_LAN); [ -z "$HOSTNAME_LAN" ] && HOSTNAME_LAN=razvilka.lan
+    [ -z "$ALIAS_IP" ] && ALIAS_IP=$(old ALIAS_IP)
+    if [ "$HOSTNAME_LAN" = none ]; then HOSTNAME_LAN=; ALIAS_IP=
+    elif [ -z "$ALIAS_IP" ]; then
+        # .254 той же сети, если он свободен и не попадает в диапазон DHCP
+        cand=${LAN_IP%.*}.254
+        in_pool=$(ndmc -c "show ip dhcp pool" 2>/dev/null | awk -v c="${cand##*.}" '/begin:/{split($2,a,".");b=a[4]} /end:/{split($2,a,".");if(c>=b && c<=a[4])print 1}')
+        if [ -z "$in_pool" ] && ! ping -c1 -W1 "$cand" >/dev/null 2>&1; then ALIAS_IP=$cand
+        else c_warn "адрес $cand занят или в диапазоне DHCP — имя $HOSTNAME_LAN не настраиваю (задайте --alias-ip)"; HOSTNAME_LAN=; fi
+    fi
     cat > "$DIR/razvilka.conf" <<EOF
 # Razvilka $VERSION — настройки (пишет инсталлятор; можно править руками, потом razvilka.sh stop && razvilka.sh start)
 VPN_IF="$VPN_IF"
@@ -321,8 +336,18 @@ VPN_RESTART="$VPN_RESTART"
 VPN_PROCESS="$VPN_PROCESS"
 # 1 = заглушка при kill switch. ОСТОРОЖНО: iPhone/Mac при ней отключают через Wi‑Fi весь трафик
 CAPTIVE_STUB="$CAPTIVE_STUB"
+HOSTNAME_LAN="$HOSTNAME_LAN"
+ALIAS_IP="$ALIAS_IP"
 EOF
     sed -e "s/@WEB_PORT@/$WEB_PORT/g" -e "s/@STUB_PORT@/$STUB_PORT/g" "$SRC/lighttpd.conf" > "$DIR/lighttpd.conf"
+    if [ -n "$ALIAS_IP" ]; then sed -i "s/@ALIAS_IP@/$ALIAS_IP/" "$DIR/lighttpd.conf"
+    else sed -i '/^#ALIAS_BEGIN/,/^#ALIAS_END/d' "$DIR/lighttpd.conf"; fi
+    # имя в DNS роутера (статическая запись Keenetic)
+    if [ -n "$HOSTNAME_LAN" ] && [ -n "$ALIAS_IP" ]; then
+        "$DIR/razvilka.sh" alias-on
+        for h in $HOSTNAME_LAN ${HOSTNAME_LAN%.*}.local; do ndmc -c "ip host $h $ALIAS_IP" >/dev/null 2>&1; done
+        ndmc -c "system configuration save" >/dev/null 2>&1
+    fi
 
     [ -n "$FAILMODE" ] && echo "$FAILMODE" > "$DIR/failmode"
     [ -f "$DIR/failmode" ] || echo direct > "$DIR/failmode"
@@ -366,12 +391,20 @@ EOF
     if netstat -ltn 2>/dev/null | grep -q ":$WEB_PORT "; then c_ok "веб-морда: http://$LAN_IP:$WEB_PORT  (логин admin); статус без пароля: http://$LAN_IP:$WEB_PORT/status"
     else c_warn "веб-морда не поднялась — см. /opt/var/log/razvilka-web.log"; fi
     [ "${GENERATED:-0}" = 1 ] && c_warn "сгенерирован пароль веб-морды: $WEB_PASS  (сменить: повторить установку с --web-pass)"
-    c_ok "заглушка: http://$LAN_IP:$STUB_PORT"
+    [ -n "$HOSTNAME_LAN" ] && c_ok "по имени: http://$HOSTNAME_LAN — статус, http://$HOSTNAME_LAN/admin — панель"
     c_ok "готово. Журнал: /opt/var/log/razvilka.log"
 }
 
 do_uninstall() {
     [ -x "$DIR/razvilka.sh" ] && "$DIR/razvilka.sh" stop >/dev/null 2>&1
+    if [ -f "$DIR/razvilka.conf" ]; then
+        hn=$(sed -n 's/^HOSTNAME_LAN="\(.*\)"$/\1/p' "$DIR/razvilka.conf"); ai=$(sed -n 's/^ALIAS_IP="\(.*\)"$/\1/p' "$DIR/razvilka.conf")
+        if [ -n "$hn" ] && [ -n "$ai" ]; then
+            for h in $hn ${hn%.*}.local; do ndmc -c "no ip host $h $ai" >/dev/null 2>&1; done
+            ndmc -c "system configuration save" >/dev/null 2>&1
+        fi
+        [ -x "$DIR/razvilka.sh" ] && "$DIR/razvilka.sh" alias-off
+    fi
     [ -x /opt/etc/init.d/S81razvilka-web ] && /opt/etc/init.d/S81razvilka-web stop >/dev/null 2>&1
     rm -f /opt/etc/init.d/S03razvilka /opt/etc/init.d/S81razvilka-web /opt/etc/ndm/netfilter.d/50-razvilka.sh \
           /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka /opt/bin/razvilka

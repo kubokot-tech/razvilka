@@ -3,7 +3,7 @@
 PIDF=/opt/var/run/razvilka-web.pid
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 case "$1" in
-    start)   running || /opt/sbin/lighttpd -f /opt/razvilka/lighttpd.conf ;;
+    start)   /opt/razvilka/razvilka.sh alias-on; running || /opt/sbin/lighttpd -f /opt/razvilka/lighttpd.conf ;;
     stop)    running && kill "$(cat "$PIDF")"; rm -f "$PIDF" ;;
     restart) "$0" stop; sleep 1; "$0" start ;;
     status)  running && echo "работает" || echo "остановлен" ;;
