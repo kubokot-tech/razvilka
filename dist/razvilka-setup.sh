@@ -29,7 +29,7 @@ set -u
 export PATH=/opt/bin:/opt/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin HOME=/opt/root
 
 DIR=/opt/razvilka
-VERSION="2026.10.15-2143"
+VERSION="2026.10.15-2153"
 PKGS="ip-full iptables ipset curl bind-dig cron lighttpd lighttpd-mod-cgi lighttpd-mod-auth lighttpd-mod-authn_file lighttpd-mod-rewrite lighttpd-mod-setenv"
 OPT_PKGS="conntrack"     # необязательные: без них работает, но хуже (conntrack — сброс соединений при переключении)
 REPO_HOSTS="bin.entware.net"
@@ -303,7 +303,12 @@ do_install() {
     install_file cron-1min /opt/etc/cron.1min/razvilka 755
     install_file cron-hourly /opt/etc/cron.hourly/razvilka 755
     install_file cron-daily /opt/etc/cron.daily/razvilka 755
-    ln -sf "$DIR/razvilka.sh" /opt/bin/razvilka   # короткая команда: razvilka status
+    # короткая команда: razvilka status. Чужой файл с тем же именем не трогаем
+    if [ -e /opt/bin/razvilka ] && [ "$(readlink /opt/bin/razvilka 2>/dev/null)" != "$DIR/razvilka.sh" ]; then
+        c_warn "/opt/bin/razvilka уже занят другой программой — команду не ставлю, используйте $DIR/razvilka.sh"
+    else
+        ln -sf "$DIR/razvilka.sh" /opt/bin/razvilka
+    fi
 
     # настройки: прежние значения сохраняются, параметры командной строки важнее
     old() { [ -f "$DIR/razvilka.conf" ] && sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$DIR/razvilka.conf" | tail -1; }
@@ -407,7 +412,8 @@ do_uninstall() {
     fi
     [ -x /opt/etc/init.d/S81razvilka-web ] && /opt/etc/init.d/S81razvilka-web stop >/dev/null 2>&1
     rm -f /opt/etc/init.d/S03razvilka /opt/etc/init.d/S81razvilka-web /opt/etc/ndm/netfilter.d/50-razvilka.sh \
-          /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka /opt/bin/razvilka
+          /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka
+    [ "$(readlink /opt/bin/razvilka 2>/dev/null)" = "$DIR/razvilka.sh" ] && rm -f /opt/bin/razvilka
     if [ $PURGE = 1 ]; then rm -rf "$DIR"; c_ok "удалено полностью"
     else
         find "$DIR" -mindepth 1 -maxdepth 1 ! -name lists ! -name contact.txt ! -name web.users ! -name failmode ! -name kill-allow.presets ! -name razvilka.conf -exec rm -rf {} +
@@ -418,7 +424,7 @@ do_uninstall() {
 
 # исходники пакета (base64 tar.gz) — подставляет build.sh
 payload() { cat <<'__RAZVILKA_PAYLOAD__'
-H4sIANse0WoAA+y9+3Ybx5kvmr/xFGUICgEJt25cSIICHUaWbJ2RZW1RSfaMJHM1gAaJEARgXEjJ
+H4sIADAh0WoAA+y9+3Ybx5kvmr/xFGUICgEJt25cSIICHUaWbJ2RZW1RSfaMJHM1gAaJEARgXEjJ
 JGf5kkwyy554J3v22bPm7LlkZv+x18o568iKZdOWRK/lJyBfYZ7kfJeq6qruBggpVnJmtmGLQHdX
 172+W331+/KF7730T7FYXKxUBH1X+bvolvlbfoRTcatl1ym7xbIoOm61WP6eqLz8qn3ve5PR2BtC
 VR74u6Px0Bv3d+PTQbJ2e0Y+sh36+9/JJ1/o9DrjlzsJ5h3/UtkpLi5WYPxLlarz3fj/MT75Qrez

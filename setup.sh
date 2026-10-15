@@ -303,7 +303,12 @@ do_install() {
     install_file cron-1min /opt/etc/cron.1min/razvilka 755
     install_file cron-hourly /opt/etc/cron.hourly/razvilka 755
     install_file cron-daily /opt/etc/cron.daily/razvilka 755
-    ln -sf "$DIR/razvilka.sh" /opt/bin/razvilka   # короткая команда: razvilka status
+    # короткая команда: razvilka status. Чужой файл с тем же именем не трогаем
+    if [ -e /opt/bin/razvilka ] && [ "$(readlink /opt/bin/razvilka 2>/dev/null)" != "$DIR/razvilka.sh" ]; then
+        c_warn "/opt/bin/razvilka уже занят другой программой — команду не ставлю, используйте $DIR/razvilka.sh"
+    else
+        ln -sf "$DIR/razvilka.sh" /opt/bin/razvilka
+    fi
 
     # настройки: прежние значения сохраняются, параметры командной строки важнее
     old() { [ -f "$DIR/razvilka.conf" ] && sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$DIR/razvilka.conf" | tail -1; }
@@ -407,7 +412,8 @@ do_uninstall() {
     fi
     [ -x /opt/etc/init.d/S81razvilka-web ] && /opt/etc/init.d/S81razvilka-web stop >/dev/null 2>&1
     rm -f /opt/etc/init.d/S03razvilka /opt/etc/init.d/S81razvilka-web /opt/etc/ndm/netfilter.d/50-razvilka.sh \
-          /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka /opt/bin/razvilka
+          /opt/etc/cron.1min/razvilka /opt/etc/cron.hourly/razvilka /opt/etc/cron.daily/razvilka
+    [ "$(readlink /opt/bin/razvilka 2>/dev/null)" = "$DIR/razvilka.sh" ] && rm -f /opt/bin/razvilka
     if [ $PURGE = 1 ]; then rm -rf "$DIR"; c_ok "удалено полностью"
     else
         find "$DIR" -mindepth 1 -maxdepth 1 ! -name lists ! -name contact.txt ! -name web.users ! -name failmode ! -name kill-allow.presets ! -name razvilka.conf -exec rm -rf {} +
