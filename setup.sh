@@ -29,6 +29,7 @@ export PATH=/opt/bin:/opt/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin HOME=/
 DIR=/opt/razvilka
 VERSION="@VERSION@"
 PKGS="ip-full iptables ipset curl bind-dig cron lighttpd lighttpd-mod-cgi lighttpd-mod-auth lighttpd-mod-authn_file lighttpd-mod-rewrite lighttpd-mod-setenv"
+OPT_PKGS="conntrack"     # необязательные: без них работает, но хуже (conntrack — сброс соединений при переключении)
 REPO_HOSTS="bin.entware.net"
 
 c_ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
@@ -83,11 +84,17 @@ iface_ok() { ping -I "$1" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -I "$1" -c 1
 
 detect_vpn() {
     [ -n "$VPN_IF" ] && return 0
+    # повторная установка: прежний интерфейс из конфига важнее автоопределения —
+    # при упавшем туннеле живого кандидата нет, и выбрался бы первый попавшийся
+    prev=$(sed -n 's/^VPN_IF="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$DIR/razvilka.conf" 2>/dev/null | tail -1)
+    [ -n "$prev" ] && [ -d "/sys/class/net/$prev" ] && { VPN_IF=$prev; return 0; }
     for i in $(vpn_candidates); do iface_ok "$i" && { VPN_IF=$i; return 0; }; done
     VPN_IF=$(vpn_candidates | head -1)
 }
 detect_isp() {
     [ -n "$ISP_IF" ] && return 0
+    prev=$(sed -n 's/^ISP_IF="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$DIR/razvilka.conf" 2>/dev/null | tail -1)
+    [ -n "$prev" ] && [ -d "/sys/class/net/$prev" ] && { ISP_IF=$prev; return 0; }
     ISP_IF=$(default_route_ifaces | grep -vxF "${VPN_IF:-none}" | grep -vE '^(opkgtun|nwg|wg|awg|tun|ovpn)' | head -1)
 }
 detect_lan_ip() {
@@ -250,7 +257,10 @@ do_install() {
 
     temp_routes_on
     c_info "пакеты Entware: $PKGS"
-    missing=; for p in $PKGS; do opkg list-installed 2>/dev/null | grep -q "^$p " || missing="$missing $p"; done
+    missing=; core=; for p in $PKGS $OPT_PKGS; do opkg list-installed 2>/dev/null | grep -q "^$p " || missing="$missing $p"; done
+    for p in $PKGS; do opkg list-installed 2>/dev/null | grep -q "^$p " || core="$core $p"; done
+    # не хватает только необязательных, а туннель лежит — репозиторий наверняка душится, не ждём
+    [ -z "$core" ] && [ -n "$missing" ] && ! iface_ok "$VPN_IF" && { c_warn "туннель лежит — необязательные пакеты ($missing) поставлю в другой раз"; missing=; }
     if [ -z "$missing" ]; then
         c_info "все пакеты уже стоят — репозиторий не трогаю"
     else
@@ -260,6 +270,7 @@ do_install() {
         with_timeout 600 opkg install $missing > /opt/tmp/razvilka-opkg.log 2>&1 || true
     fi
     for p in $PKGS; do opkg list-installed | grep -q "^$p " || die "не встал пакет $p (см. /opt/tmp/razvilka-opkg.log)"; done
+    for p in $OPT_PKGS; do opkg list-installed | grep -q "^$p " || c_warn "не встал необязательный пакет $p — поставлю при следующем запуске"; done
     c_ok "пакеты на месте"
     temp_routes_off
 
@@ -281,7 +292,8 @@ do_install() {
     install_file www/favicon.svg "$DIR/www/favicon.svg" 644
     install_file init/S03razvilka /opt/etc/init.d/S03razvilka 755
     install_file init/S81razvilka-web /opt/etc/init.d/S81razvilka-web 755
-    install_file netfilter.sh /opt/etc/ndm/netfilter.d/50-razvilka.sh 755
+    # хук netfilter.d больше не нужен (был частью kill switch, который вешал роутер) — убираем у старых установок
+    rm -f /opt/etc/ndm/netfilter.d/50-razvilka.sh
     install_file cron-1min /opt/etc/cron.1min/razvilka 755
     install_file cron-hourly /opt/etc/cron.hourly/razvilka 755
     install_file cron-daily /opt/etc/cron.daily/razvilka 755
@@ -294,6 +306,7 @@ do_install() {
     [ -z "$VPN_SERVERS" ] && VPN_SERVERS=$(old VPN_SERVERS_EXTRA)
     [ -z "$VPN_RESTART" ] && VPN_RESTART=$(old VPN_RESTART)
     [ -z "$VPN_PROCESS" ] && VPN_PROCESS=$(old VPN_PROCESS)
+    CAPTIVE_STUB=$(old CAPTIVE_STUB); [ -z "$CAPTIVE_STUB" ] && CAPTIVE_STUB=0
     cat > "$DIR/razvilka.conf" <<EOF
 # Razvilka $VERSION — настройки (пишет инсталлятор; можно править руками, потом razvilka.sh stop && razvilka.sh start)
 VPN_IF="$VPN_IF"
@@ -305,6 +318,8 @@ STUB_PORT="$STUB_PORT"
 VPN_SERVERS_EXTRA="$(echo $VPN_SERVERS)"
 VPN_RESTART="$VPN_RESTART"
 VPN_PROCESS="$VPN_PROCESS"
+# 1 = заглушка при kill switch. ОСТОРОЖНО: iPhone/Mac при ней отключают через Wi‑Fi весь трафик
+CAPTIVE_STUB="$CAPTIVE_STUB"
 EOF
     sed -e "s/@WEB_PORT@/$WEB_PORT/g" -e "s/@STUB_PORT@/$STUB_PORT/g" "$SRC/lighttpd.conf" > "$DIR/lighttpd.conf"
 

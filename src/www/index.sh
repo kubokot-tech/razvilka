@@ -98,8 +98,8 @@ eval "$($FVPN status-kv 2>/dev/null | grep -E '^[a-z_]+=[A-Za-z0-9 .:/_-]*$' | s
 case "$msg" in
     started) m="Схема включена." ;;  stopped) m="Схема выключена: весь трафик идёт напрямую." ;;
     mode) m="Режим при падении VPN изменён." ;; checked) m="Проверка выполнена." ;;
-    updated) m="Список российских сетей обновлён." ;; killtest) m="Заглушка включена на 3 минуты. Откройте любой http-сайт, например http://neverssl.com" ;;
-    killtest_off) m="Тест заглушки остановлен." ;; vpn_restart) m="VPN перезапущен." ;;
+    updated) m="Список российских сетей обновлён." ;; killtest) m="Kill switch включён на 3 минуты: зарубежное закрыто, российское должно работать." ;;
+    killtest_off) m="Тест kill switch остановлен." ;; vpn_restart) m="VPN перезапущен." ;;
     contact) m="Контакт сохранён, заглушка обновлена." ;;
     added) IFS='|' read -r ae al am ah < "$DIR/last_add" 2>/dev/null
            [ "$al" = isp ] && aln="всегда напрямую" || aln="всегда через VPN"
@@ -114,9 +114,9 @@ case "$msg" in
 esac
 
 if [ "$S_enabled" != 1 ]; then st="off"; stt="Схема выключена"; std="Весь трафик идёт напрямую, как без пакета. Ручные списки не действуют."
-elif [ "$S_killtest" = 1 ]; then st="warn"; stt="Тест заглушки"; std="Зарубежное с устройств закрыто, HTTP показывает заглушку. Само выключится через 3 минуты."
+elif [ "$S_killtest" = 1 ]; then st="warn"; stt="Тест kill switch"; std="Зарубежное с устройств закрыто, российское работает. Само выключится через 3 минуты."
 elif [ "$S_tunnel" = 1 ] && [ "$S_rule" = 1 ]; then st="ok"; stt="Всё работает"; std="Иностранный трафик идёт через VPN, российский — напрямую."
-elif [ "$S_kill" = 1 ]; then st="bad"; stt="VPN упал — kill switch включён"; std="Зарубежное с устройств закрыто, HTTP-сайты показывают заглушку. Российские сайты работают."
+elif [ "$S_kill" = 1 ]; then st="bad"; stt="VPN упал — kill switch включён"; std="Зарубежное с устройств закрыто (мгновенный отказ). Российские сайты работают."
 elif [ "$S_tunnel" != 1 ] && [ "$S_rule" != 1 ]; then st="bad"; stt="VPN упал — зарубежное напрямую"; std="Иностранные сайты открываются напрямую, с заморозками провайдера."
 elif [ "$S_tunnel" != 1 ]; then st="warn"; stt="VPN не отвечает"; std="Проверка $S_fails из 2 — если не оживёт, сработает режим «при падении VPN»."
 else st="warn"; stt="Туннель жив, правило ещё не включено"; std="Сторож включит его в течение минуты."
@@ -320,9 +320,17 @@ $(if [ "$S_enabled" = 1 ]; then echo '<form method="post"><button class="danger"
 
 <div class="sub">Если VPN упал</div>
 <p class="mut" style="margin:-4px 0 10px">Проверка раз в минуту, срабатывает после 2 неудач подряд.</p>
-<div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
-<span><b>Зарубежное временно идёт напрямую.</b> Kill switch (заглушка) отключён: при упавшем туннеле он вешал
-роутер — помогала только перезагрузка по питанию. Переделывается; российское и так всегда идёт напрямую.</span></div>
+<div class="seg" role="group" aria-label="Режим при падении VPN">
+<form method="post"><button class="$([ "$S_failmode" = kill ] && echo sel)" aria-pressed="$([ "$S_failmode" = kill ] && echo true || echo false)" name="action" value="mode_kill"><span>Закрыть зарубежное</span><small>kill switch</small></button></form>
+<form method="post"><button class="$([ "$S_failmode" = direct ] && echo sel)" aria-pressed="$([ "$S_failmode" = direct ] && echo true || echo false)" name="action" value="mode_direct"><span>Пускать напрямую</span><small>с замедлением провайдера</small></button></form>
+</div>
+<div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></svg>
+<span>Kill switch: зарубежное с устройств сразу получает отказ, российское работает как обычно. Сделано только
+маршрутами. Страница-заглушка по умолчанию выключена: iPhone и Mac принимают её за «вход в сеть» и перестают
+пускать через Wi‑Fi весь трафик, включая российский.</span></div>
+<div class="inline">
+$(if [ "$S_killtest" = 1 ]; then echo '<form method="post"><button class="pri" name="action" value="killtest_off">Остановить тест</button></form>'; else echo '<form method="post"><button name="action" value="killtest">Тест kill switch на 3 минуты</button></form>'; fi)
+</div>
 </section>
 
 <section class="card check" id="check">

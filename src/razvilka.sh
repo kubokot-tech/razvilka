@@ -40,6 +40,8 @@ STUB_PORT=8098
 WEB_PORT=98
 VPN_SERVERS_EXTRA=""     # адреса VPN-сервера вручную, если не определяются сами
 VPN_PROCESS=""           # имя процесса VPN-клиента: по его соединениям находится адрес сервера
+CAPTIVE_STUB=0           # 1 = при kill switch подменять http на зарубежное страницей-заглушкой. ОСТОРОЖНО:
+                         # iPhone/Mac принимают её за «вход в сеть» и перестают пускать через Wi‑Fi ВЕСЬ трафик
 VPN_RESTART=""           # команда перезапуска VPN для кнопки в веб-морде
 [ -f "$DIR/razvilka.conf" ] && . "$DIR/razvilka.conf"
 
@@ -47,7 +49,7 @@ TABLE=1022
 PRIO=30022
 FORCE_TABLE=1020
 FORCE_PRIO=30020
-SET=razvilka_direct          # ipset: куда можно напрямую, когда VPN упал
+SET=razvilka_direct          # ipset для правила заглушки (см. блок kill switch)
 LISTS=$DIR/lists
 DIRECT_LIST=$LISTS/direct.list
 VPN_LIST=$LISTS/vpn.list
@@ -84,14 +86,7 @@ log() {
     [ "$(wc -c < "$LOG")" -gt 200000 ] && tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 }
 
-# ВРЕМЕННО: kill switch на iptables/ipset вешает Keenetic при упавшем туннеле (воспроизведено 15.10:
-# роутер перестаёт отвечать даже на ping, помогает только перезагрузка по питанию). Пока он не
-# переделан, при падении туннеля всегда действует безопасный режим direct.
-KILL_DISABLED=1
-failmode() {
-    [ -n "$KILL_DISABLED" ] && { echo direct; return; }
-    m=$(cat "$MODE_FILE" 2>/dev/null); [ "$m" = direct ] && echo direct || echo kill
-}
+failmode() { m=$(cat "$MODE_FILE" 2>/dev/null); [ "$m" = direct ] && echo direct || echo kill; }
 
 isp_gw() {
     ip route show table main default | awk -v d="$ISP_IF" '$0 ~ "dev " d {for (i=1;i<NF;i++) if ($i=="via") {print $(i+1); exit}}'
@@ -172,8 +167,29 @@ build() {
 # у ядра Keenetic есть кэш маршрутов: после любой перестройки его надо сбрасывать,
 # иначе старые решения живут ещё какое-то время
 flush_cache() { ip route flush cache 2>/dev/null; }
-rule_on()  { ip rule show | grep -q "^$PRIO:" || { ip rule add table $TABLE priority $PRIO; flush_cache; }; }
-rule_off() { while ip rule show | grep -q "^$PRIO:"; do ip rule del priority $PRIO; done; flush_cache; }
+# Страховка: всё, что адресовано в частные сети (домашняя сеть, ответы устройствам, сам роутер),
+# идёт по обычной таблице main, мимо таблиц Razvilka. Даже если наша таблица окажется пустой или
+# сломанной, домашняя сеть и доступ к роутеру не пострадают (15.10: без этого kill switch на
+# недостроенной таблице отправлял ответы в домашнюю сеть провайдеру, и роутер «пропадал»).
+GUARD_PRIO=30018
+guard_on() {
+    for p in 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do
+        ip rule show | grep -q "^$GUARD_PRIO:.* to $p lookup main" || ip rule add to $p table main priority $GUARD_PRIO
+    done
+}
+guard_off() { while ip rule show | grep -q "^$GUARD_PRIO:"; do ip rule del priority $GUARD_PRIO; done; }
+
+# Сброс соединений домашней сети при смене маршрута: Keenetic уводит установленные соединения в аппаратное
+# ускорение (FASTNAT), и они живут по старому маршруту, пока не закроются сами (15.10: после включения
+# kill switch Gmail и ChatGPT ещё какое-то время ходили напрямую). Устройства тут же переоткроют их заново.
+flush_flows() {
+    command -v conntrack >/dev/null 2>&1 || return 0
+    for n in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do conntrack -D -s $n >/dev/null 2>&1; done
+    return 0
+}
+
+rule_on()  { ip rule show | grep -q "^$PRIO:" || { ip rule add table $TABLE priority $PRIO; flush_cache; flush_flows; }; }
+rule_off() { ip rule show | grep -q "^$PRIO:" || return 0; while ip rule show | grep -q "^$PRIO:"; do ip rule del priority $PRIO; done; flush_cache; flush_flows; }
 rule_is_on() { ip rule show | grep -q "^$PRIO:"; }
 table_ok() { ip route show table $TABLE | grep -q "^default dev $VPN_IF"; }
 
@@ -229,7 +245,7 @@ build_force() {
     ip rule show | grep -q "^$FORCE_PRIO:" || ip rule add table $FORCE_TABLE priority $FORCE_PRIO
     flush_cache
     log "ручные списки: $(wc -l < "$DIR/direct.resolved") адресов напрямую, $(wc -l < "$DIR/vpn.resolved") через VPN (маршрутов $n)"
-    [ -f "$KILL_FLAG" ] && build_set
+    [ -f "$KILL_FLAG" ] && kill_on
     return 0
 }
 # маршруты списков пропадают, когда VPN-интерфейс пересоздаётся
@@ -245,15 +261,34 @@ force_off() {
 }
 
 # ---------- kill switch ----------
+#
+# Блокирует маршрутизация — без правил в FORWARD и без хука netfilter.d. Прежняя версия (до 15.10)
+# при упавшем туннеле включалась на недостроенной таблице 1022: ответы в домашнюю сеть уходили провайдеру,
+# и роутер «пропадал» из сети целиком.
+#   - table 1022: default -> prohibit (зарубежное с устройств сразу получает отказ от ядра);
+#   - записи «через VPN» из ручных списков -> тоже prohibit (не висеть в мёртвом туннеле);
+#   - ip rule iif lo -> main (трафик самого роутера — DNS, переподключение VPN — напрямую);
+#   - заглушка (только если CAPTIVE_STUB=1, по умолчанию выключена): одно правило nat — tcp/80 на
+#     зарубежные адреса -> страница-заглушка. На неё попадают проверки интернета (captive portal), и
+#     iPhone/Mac считают сеть «требующей входа» — до «входа» они не пускают через Wi‑Fi вообще ничего,
+#     включая российское (проверено 15.10). Поэтому по умолчанию — только мгновенный отказ.
+#   - страховка: ip rule to <частные сети> lookup main (prio 30018) — домашняя сеть и роутер доступны
+#     при любом состоянии наших таблиц.
 
-# ipset «можно напрямую»: РФ + список «напрямую» + VPN-сервер + DNS + локальное
+KILL_PRIO=30019
+CAPTIVE_CHAIN=RAZVILKA_CAPTIVE
+
+# ipset «не трогать заглушкой»: сети РФ + «напрямую» + VPN-сервер + DNS + частные сети.
+# Нужен только для одного правила nat (tcp/80 на зарубежные адреса -> заглушка): IP служебных адресов
+# проверки интернета (captive.apple.com, connectivitycheck.gstatic.com...) меняются постоянно, списком
+# конкретных IP их не поймать. Блокирует при этом маршрутизация, не iptables.
 build_set() {
     {
         echo "create ${SET}_tmp hash:net maxelem 131072 -exist"
         echo "flush ${SET}_tmp"
         for p in $PRIVATE; do echo "add ${SET}_tmp $p -exist"; done
         for r in $RESOLVERS; do echo "add ${SET}_tmp $r -exist"; done
-        for s in $(vpn_servers); do echo "add ${SET}_tmp $s -exist"; done
+        for v in $(vpn_servers); do echo "add ${SET}_tmp $v -exist"; done
         awk '{print "add '"${SET}"'_tmp " $1 " -exist"}' "$RU_LIST"
         [ -f "$DIR/direct.resolved" ] && awk '{print "add '"${SET}"'_tmp " $1 " -exist"}' "$DIR/direct.resolved"
     } > "$DIR/ipset.restore"
@@ -261,35 +296,72 @@ build_set() {
     ipset restore < "$DIR/ipset.restore" && ipset swap ${SET}_tmp $SET && ipset destroy ${SET}_tmp
 }
 
-# правила iptables (идемпотентно: -C проверяет, есть ли уже)
-ipt() { iptables -t "$1" -C $2 2>/dev/null || iptables -t "$1" -I $2; }
-ipt_del() { while iptables -t "$1" -C $2 2>/dev/null; do iptables -t "$1" -D $2; done; }
-R_STUB="PREROUTING -i $LAN_IF -p tcp --dport 80 -m set ! --match-set $SET dst -j DNAT --to-destination $LAN_IP:$STUB_PORT"
-R_TCP="FORWARD -i $LAN_IF -p tcp -m set ! --match-set $SET dst -j REJECT --reject-with tcp-reset"
-R_ANY="FORWARD -i $LAN_IF -m set ! --match-set $SET dst -j REJECT --reject-with icmp-net-unreachable"
-
-kill_rules_on() {
-    ipt nat "$R_STUB"
-    ipt filter "$R_ANY"
-    ipt filter "$R_TCP"     # вставляется выше R_ANY: TCP получает мгновенный сброс
+captive_on() {
+    [ "$CAPTIVE_STUB" = 1 ] || { captive_off; return 0; }
+    command -v ipset >/dev/null 2>&1 || return 0
+    # пустой или битый набор = заглушка перехватила бы и российские http-сайты — тогда без заглушки
+    build_set || { log "заглушка: не собрался ipset — без неё"; captive_off; return 0; }
+    [ "$(grep -c '^add' "$DIR/ipset.restore")" -gt 1000 ] || { log "заглушка: в наборе подозрительно мало сетей — без неё"; captive_off; return 0; }
+    iptables -t nat -N $CAPTIVE_CHAIN 2>/dev/null
+    iptables -t nat -F $CAPTIVE_CHAIN
+    iptables -t nat -A $CAPTIVE_CHAIN -p tcp -m set ! --match-set $SET dst -j DNAT --to-destination "$LAN_IP:$STUB_PORT"
+    iptables -t nat -C PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN 2>/dev/null \
+        || iptables -t nat -I PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN
 }
-kill_rules_off() { ipt_del nat "$R_STUB"; ipt_del filter "$R_TCP"; ipt_del filter "$R_ANY"; }
+captive_off() {
+    while iptables -t nat -C PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN 2>/dev/null; do
+        iptables -t nat -D PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN
+    done
+    iptables -t nat -F $CAPTIVE_CHAIN 2>/dev/null; iptables -t nat -X $CAPTIVE_CHAIN 2>/dev/null
+    ipset destroy $SET 2>/dev/null
+    return 0
+}
+
+# остатки реализации до 15.10 (ipset + REJECT в FORWARD) — снимаем, если вдруг есть
+legacy_kill_off() {
+    for r in "nat PREROUTING -i $LAN_IF -p tcp --dport 80 -m set ! --match-set $SET dst -j DNAT --to-destination $LAN_IP:$STUB_PORT" \
+             "filter FORWARD -i $LAN_IF -p tcp -m set ! --match-set $SET dst -j REJECT --reject-with tcp-reset" \
+             "filter FORWARD -i $LAN_IF -m set ! --match-set $SET dst -j REJECT --reject-with icmp-net-unreachable"; do
+        t=${r%% *}; rule=${r#* }
+        while iptables -t "$t" -C $rule 2>/dev/null; do iptables -t "$t" -D $rule; done
+    done
+    ipset destroy $SET 2>/dev/null
+    return 0
+}
 
 kill_on() {
-    build_set || { log "kill switch: не удалось собрать ipset — отпускаю напрямую"; return 1; }
-    # трафик самого роутера (DNS, переподключение VPN) — напрямую;
-    # устройствам зарубежное режут правила iptables
-    gw=$(isp_gw); [ -n "$gw" ] && ip route replace default via "$gw" dev $ISP_IF table $TABLE
+    guard_on
+    # без базовой таблицы (сети РФ, исключения) kill switch закрыл бы и российское — сначала строим её.
+    # build работает и при лежащем туннеле: интерфейс есть, адрес сервера — из запомненного
+    if ! ip route show table $TABLE | grep -q '^throw'; then
+        build || { log "kill switch: базовая таблица не строится — оставляю напрямую"; return 1; }
+    fi
+    # трафик самого роутера — мимо всех наших таблиц, напрямую
+    ip rule show | grep -q "^$KILL_PRIO:" || ip rule add iif lo table main priority $KILL_PRIO
+    # устройствам: зарубежное и «через VPN» — мгновенный отказ, российское — как обычно
+    gw=$(isp_gw)
+    {
+        echo "route replace prohibit default table $TABLE"
+        # публичные DNS — напрямую: иначе устройства с «зашитым» DNS (Android, Chromecast, ноутбуки)
+        # потеряют и российские сайты
+        [ -n "$gw" ] && for r in $RESOLVERS; do echo "route replace $r via $gw dev $ISP_IF table $TABLE"; done
+        [ -f "$DIR/vpn.resolved" ] && grep -vxF -f "$DIR/direct.resolved" "$DIR/vpn.resolved" 2>/dev/null \
+            | awk -v t="$FORCE_TABLE" '{print "route replace prohibit " $1 " table " t}'
+    } > "$DIR/kill.batch"
+    ip -batch "$DIR/kill.batch" 2>/dev/null
     rule_on; flush_cache
-    kill_rules_on
-    [ -f "$KILL_FLAG" ] || { touch "$KILL_FLAG"; log "KILL SWITCH ВКЛ: зарубежное с устройств закрыто, HTTP -> заглушка"; }
+    captive_on    # повторяем каждую минуту: прошивка могла пересобрать таблицу nat
+    [ -f "$KILL_FLAG" ] || { touch "$KILL_FLAG"; flush_flows; log "KILL SWITCH ВКЛ: зарубежное с устройств закрыто (мгновенный отказ), российское работает"; }
 }
 kill_off() {
-    kill_rules_off
+    captive_off
+    while ip rule show | grep -q "^$KILL_PRIO:"; do ip rule del priority $KILL_PRIO; done
     if [ -f "$KILL_FLAG" ]; then
         rm -f "$KILL_FLAG"
         ip route replace default dev $VPN_IF table $TABLE 2>/dev/null
-        flush_cache
+        for r in $RESOLVERS; do ip route del "$r" table $TABLE 2>/dev/null; done
+        [ -f "$ENABLED" ] && build_force >/dev/null 2>&1
+        flush_cache; flush_flows
         log "kill switch выкл"
     fi
 }
@@ -395,15 +467,16 @@ EOF
 
 watchdog() {
     [ -f "$ENABLED" ] || return 0
+    guard_on
     force_ok || build_force
-    if [ -z "$KILL_DISABLED" ] && killtest_active; then
+    if killtest_active; then
         kill_on; return 0
     fi
     rm -f "$TEST_UNTIL"
     if tunnel_ok; then
         echo 0 > "$FAILS"
         [ -f "$KILL_FLAG" ] && { kill_off; log "туннель жив — kill switch снят"; }
-        kill_rules_off   # на всякий случай: хук netfilter мог вернуть правила
+        captive_off      # на всякий случай: заглушка не должна жить при живом туннеле
         # таблица пропала (переподключение VPN удаляет маршруты через dev),
         # сменился шлюз провайдера или адрес VPN-сервера -> перестроить
         want="gw=$(isp_gw) servers=$(echo $(vpn_servers))"
@@ -483,7 +556,6 @@ status_kv() {
     echo "kill=$([ -f "$KILL_FLAG" ] && echo 1 || echo 0)"
     echo "killtest=$(killtest_active && echo 1 || echo 0)"
     echo "failmode=$(failmode)"
-    echo "kill_disabled=${KILL_DISABLED:-0}"
     echo "fails=$(cat "$FAILS" 2>/dev/null || echo 0)"
     echo "routes=$(ip route show table $TABLE | wc -l)"
     echo "ru=$(wc -l < "$RU_LIST" 2>/dev/null || echo 0)"
@@ -502,15 +574,14 @@ status_kv() {
 case "$1" in
     start)
         mkdir -p "$DIR" "$LISTS" "$(dirname "$LOG")"; touch "$ENABLED"; echo 0 > "$FAILS"
-        [ -n "$KILL_DISABLED" ] && { rm -f "$TEST_UNTIL"; kill_off; kill_rules_off; ipset destroy $SET 2>/dev/null; }
+        legacy_kill_off; guard_on
         [ -f "$DIR/stub/index.html" ] || make_stub
         build_force
         if tunnel_ok && build; then rule_on; kill_off; log "включено"; else log "включено, жду туннель (сторож достроит)"; fi
         ;;
     stop)
-        rm -f "$ENABLED" "$TEST_UNTIL"; kill_off; kill_rules_off; rule_off
+        rm -f "$ENABLED" "$TEST_UNTIL"; kill_off; legacy_kill_off; rule_off; guard_off
         ip route flush table $TABLE 2>/dev/null; force_off
-        ipset destroy $SET 2>/dev/null
         log "выключено"
         ;;
     update)
@@ -533,16 +604,12 @@ case "$1" in
     mode)
         case "$2" in
             kill|direct)
-                echo "$2" > "$MODE_FILE"; log "режим при падении VPN: $2"
-                [ "$2" = kill ] && [ -n "$KILL_DISABLED" ] && log "kill switch временно отключён (вешал роутер при упавшем туннеле) — действует direct"
-                watchdog ;;
+                echo "$2" > "$MODE_FILE"; log "режим при падении VPN: $2"; watchdog ;;
             *) echo "usage: $0 mode kill|direct"; exit 1 ;;
         esac
         ;;
     killtest)
-        if [ -n "$KILL_DISABLED" ]; then
-            echo "kill switch временно отключён"; rm -f "$TEST_UNTIL"; exit 1
-        elif [ "$2" = off ]; then
+        if [ "$2" = off ]; then
             rm -f "$TEST_UNTIL"; log "тест заглушки остановлен"; watchdog
         else
             min=${2:-3}; case "$min" in ''|*[!0-9]*) min=3 ;; esac; [ "$min" -gt 30 ] && min=30
@@ -555,7 +622,7 @@ case "$1" in
         make_stub
         ;;
     netfilter)
-        [ -z "$KILL_DISABLED" ] && [ -f "$KILL_FLAG" ] && kill_rules_on
+        :   # хук netfilter.d больше не используется (см. блок kill switch)
         ;;
     vpn-restart)
         [ -n "$VPN_RESTART" ] || { log "VPN_RESTART не задан в razvilka.conf"; exit 1; }

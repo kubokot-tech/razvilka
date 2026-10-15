@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 VERSION=${VERSION:-$(date +%Y.%m.%d-%H%M)}
-for f in setup.sh src/razvilka.sh src/www/index.sh src/init/* src/netfilter.sh src/cron-*; do sh -n "$f"; done
+for f in setup.sh src/razvilka.sh src/www/index.sh src/init/* src/cron-*; do sh -n "$f"; done
 mkdir -p dist
 B64=$(COPYFILE_DISABLE=1 tar czf - --no-xattrs -C src . 2>/dev/null | base64 | fold -w 76)
 printf '%s\n' "$B64" > dist/.b64
