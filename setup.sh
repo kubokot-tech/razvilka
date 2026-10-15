@@ -17,7 +17,7 @@
 #   --vpn-restart CMD   команда перезапуска VPN для кнопки в веб-морде
 #   --web-pass PASS     пароль веб-морды (логин admin); без него — спросит или оставит прежний
 #   --web-port N        порт веб-морды (98)          --stub-port N   порт заглушки (8098)
-#   --contact TEXT      контакт на заглушке           --failmode kill|direct  (kill)
+#   --contact TEXT      контакт на заглушке           --failmode kill|direct  (direct; kill временно отключён)
 #   --keep-bird         не удалять Bird4Static/web4static (по умолчанию удаляются: списки переносятся)
 #   --yes               не задавать вопросов
 #
@@ -250,8 +250,15 @@ do_install() {
 
     temp_routes_on
     c_info "пакеты Entware: $PKGS"
-    opkg update >/dev/null 2>&1 || c_warn "opkg update с ошибками — пробую дальше"
-    opkg install $PKGS > /opt/tmp/razvilka-opkg.log 2>&1 || true
+    missing=; for p in $PKGS; do opkg list-installed 2>/dev/null | grep -q "^$p " || missing="$missing $p"; done
+    if [ -z "$missing" ]; then
+        c_info "все пакеты уже стоят — репозиторий не трогаю"
+    else
+        # с таймаутом: при упавшем туннеле провайдер может душить репозиторий, и opkg висит вечно
+        with_timeout() { t=$1; shift; "$@" & pid=$!; ( sleep "$t"; kill $pid 2>/dev/null; pkill -P $pid 2>/dev/null; killall wget 2>/dev/null ) & w=$!; wait $pid; rc=$?; kill $w 2>/dev/null; return $rc; }
+        with_timeout 180 opkg update >/dev/null 2>&1 || c_warn "opkg update не завершился (провайдер режет репозиторий?) — пробую дальше"
+        with_timeout 600 opkg install $missing > /opt/tmp/razvilka-opkg.log 2>&1 || true
+    fi
     for p in $PKGS; do opkg list-installed | grep -q "^$p " || die "не встал пакет $p (см. /opt/tmp/razvilka-opkg.log)"; done
     c_ok "пакеты на месте"
     temp_routes_off
@@ -302,7 +309,7 @@ EOF
     sed -e "s/@WEB_PORT@/$WEB_PORT/g" -e "s/@STUB_PORT@/$STUB_PORT/g" "$SRC/lighttpd.conf" > "$DIR/lighttpd.conf"
 
     [ -n "$FAILMODE" ] && echo "$FAILMODE" > "$DIR/failmode"
-    [ -f "$DIR/failmode" ] || echo kill > "$DIR/failmode"
+    [ -f "$DIR/failmode" ] || echo direct > "$DIR/failmode"
     if [ -n "$CONTACT" ]; then printf '%s\n' "$CONTACT" > "$DIR/contact.txt"
     elif [ ! -s "$DIR/contact.txt" ] && [ -n "$TTY" ]; then
         ask "Контакт на заглушке (кому писать, если VPN упал)" ""; [ -n "$REPLY" ] && printf '%s\n' "$REPLY" > "$DIR/contact.txt"

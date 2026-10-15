@@ -84,7 +84,14 @@ log() {
     [ "$(wc -c < "$LOG")" -gt 200000 ] && tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 }
 
-failmode() { m=$(cat "$MODE_FILE" 2>/dev/null); [ "$m" = direct ] && echo direct || echo kill; }
+# ВРЕМЕННО: kill switch на iptables/ipset вешает Keenetic при упавшем туннеле (воспроизведено 15.10:
+# роутер перестаёт отвечать даже на ping, помогает только перезагрузка по питанию). Пока он не
+# переделан, при падении туннеля всегда действует безопасный режим direct.
+KILL_DISABLED=1
+failmode() {
+    [ -n "$KILL_DISABLED" ] && { echo direct; return; }
+    m=$(cat "$MODE_FILE" 2>/dev/null); [ "$m" = direct ] && echo direct || echo kill
+}
 
 isp_gw() {
     ip route show table main default | awk -v d="$ISP_IF" '$0 ~ "dev " d {for (i=1;i<NF;i++) if ($i=="via") {print $(i+1); exit}}'
@@ -389,7 +396,7 @@ EOF
 watchdog() {
     [ -f "$ENABLED" ] || return 0
     force_ok || build_force
-    if killtest_active; then
+    if [ -z "$KILL_DISABLED" ] && killtest_active; then
         kill_on; return 0
     fi
     rm -f "$TEST_UNTIL"
@@ -476,6 +483,7 @@ status_kv() {
     echo "kill=$([ -f "$KILL_FLAG" ] && echo 1 || echo 0)"
     echo "killtest=$(killtest_active && echo 1 || echo 0)"
     echo "failmode=$(failmode)"
+    echo "kill_disabled=${KILL_DISABLED:-0}"
     echo "fails=$(cat "$FAILS" 2>/dev/null || echo 0)"
     echo "routes=$(ip route show table $TABLE | wc -l)"
     echo "ru=$(wc -l < "$RU_LIST" 2>/dev/null || echo 0)"
@@ -494,6 +502,7 @@ status_kv() {
 case "$1" in
     start)
         mkdir -p "$DIR" "$LISTS" "$(dirname "$LOG")"; touch "$ENABLED"; echo 0 > "$FAILS"
+        [ -n "$KILL_DISABLED" ] && { rm -f "$TEST_UNTIL"; kill_off; kill_rules_off; ipset destroy $SET 2>/dev/null; }
         [ -f "$DIR/stub/index.html" ] || make_stub
         build_force
         if tunnel_ok && build; then rule_on; kill_off; log "включено"; else log "включено, жду туннель (сторож достроит)"; fi
@@ -523,12 +532,17 @@ case "$1" in
         ;;
     mode)
         case "$2" in
-            kill|direct) echo "$2" > "$MODE_FILE"; log "режим при падении VPN: $2"; watchdog ;;
+            kill|direct)
+                echo "$2" > "$MODE_FILE"; log "режим при падении VPN: $2"
+                [ "$2" = kill ] && [ -n "$KILL_DISABLED" ] && log "kill switch временно отключён (вешал роутер при упавшем туннеле) — действует direct"
+                watchdog ;;
             *) echo "usage: $0 mode kill|direct"; exit 1 ;;
         esac
         ;;
     killtest)
-        if [ "$2" = off ]; then
+        if [ -n "$KILL_DISABLED" ]; then
+            echo "kill switch временно отключён"; rm -f "$TEST_UNTIL"; exit 1
+        elif [ "$2" = off ]; then
             rm -f "$TEST_UNTIL"; log "тест заглушки остановлен"; watchdog
         else
             min=${2:-3}; case "$min" in ''|*[!0-9]*) min=3 ;; esac; [ "$min" -gt 30 ] && min=30
@@ -541,7 +555,7 @@ case "$1" in
         make_stub
         ;;
     netfilter)
-        [ -f "$KILL_FLAG" ] && kill_rules_on
+        [ -z "$KILL_DISABLED" ] && [ -f "$KILL_FLAG" ] && kill_rules_on
         ;;
     vpn-restart)
         [ -n "$VPN_RESTART" ] || { log "VPN_RESTART не задан в razvilka.conf"; exit 1; }

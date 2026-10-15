@@ -320,16 +320,9 @@ $(if [ "$S_enabled" = 1 ]; then echo '<form method="post"><button class="danger"
 
 <div class="sub">Если VPN упал</div>
 <p class="mut" style="margin:-4px 0 10px">Проверка раз в минуту, срабатывает после 2 неудач подряд.</p>
-<div class="seg" role="group" aria-label="Режим при падении VPN">
-<form method="post"><button class="$([ "$S_failmode" = kill ] && echo sel)" aria-pressed="$([ "$S_failmode" = kill ] && echo true || echo false)" name="action" value="mode_kill"><span>Заглушка</span><small>kill switch</small></button></form>
-<form method="post"><button class="$([ "$S_failmode" = direct ] && echo sel)" aria-pressed="$([ "$S_failmode" = direct ] && echo true || echo false)" name="action" value="mode_direct"><span>Пускать напрямую</span><small>с заморозками провайдера</small></button></form>
-</div>
-<div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></svg>
-<span>HTTP-сайты показывают страницу-заглушку, HTTPS и приложения сразу получают отказ (подменить HTTPS без ошибки сертификата нельзя). Телефоны обычно сами открывают окно «Войдите в сеть» с заглушкой.</span></div>
-<div class="inline">
-$(if [ "$S_killtest" = 1 ]; then echo '<form method="post"><button class="pri" name="action" value="killtest_off">Остановить тест заглушки</button></form>'; else echo '<form method="post"><button name="action" value="killtest">Тест заглушки на 3 минуты</button></form>'; fi)
-<a class="btn" href="http://${S_lan_ip:-192.168.1.1}:${S_stub_port:-8098}/" target="_blank">Посмотреть заглушку ↗</a>
-</div>
+<div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
+<span><b>Зарубежное временно идёт напрямую.</b> Kill switch (заглушка) отключён: при упавшем туннеле он вешал
+роутер — помогала только перезагрузка по питанию. Переделывается; российское и так всегда идёт напрямую.</span></div>
 </section>
 
 <section class="card check" id="check">
