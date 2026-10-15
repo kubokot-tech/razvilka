@@ -302,7 +302,7 @@ cat <<EOF
 
 <div class="tiles">
 <div class="tile"><span class="k">VPN-туннель</span><span class="v"><i class="led $([ "$S_tunnel" = 1 ] && echo on || echo no)"></i>$([ "$S_tunnel" = 1 ] && echo "жив" || echo "не отвечает")</span>${S_vpn_ip:+<small>$S_vpn_ip</small>}</div>
-<div class="tile"><span class="k">При падении VPN</span><span class="v">$([ "$S_failmode" = kill ] && echo "заглушка (kill switch)" || echo "напрямую")</span></div>
+<div class="tile"><span class="k">При падении VPN</span><span class="v">$([ "$S_failmode" = kill ] && echo "закрыть зарубежное" || echo "напрямую")</span></div>
 <div class="tile"><span class="k">Сети РФ напрямую</span><span class="v">${S_ru:-0}</span><small>обновлён ${S_ru_date:-—}</small></div>
 <div class="tile"><span class="k">Сервер VPN напрямую</span><span class="v">${S_servers:-—}</span></div>
 <div class="tile"><span class="k">Ручные списки</span><span class="v">${S_direct_n:-0} напрямую · ${S_vpn_n:-0} через VPN</span></div>
@@ -325,9 +325,8 @@ $(if [ "$S_enabled" = 1 ]; then echo '<form method="post"><button class="danger"
 <form method="post"><button class="$([ "$S_failmode" = direct ] && echo sel)" aria-pressed="$([ "$S_failmode" = direct ] && echo true || echo false)" name="action" value="mode_direct"><span>Пускать напрямую</span><small>с замедлением провайдера</small></button></form>
 </div>
 <div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></svg>
-<span>Kill switch: зарубежное с устройств сразу получает отказ, российское работает как обычно. Сделано только
-маршрутами. Страница-заглушка по умолчанию выключена: iPhone и Mac принимают её за «вход в сеть» и перестают
-пускать через Wi‑Fi весь трафик, включая российский.</span></div>
+<span>«Закрыть зарубежное» — пока туннель не работает, зарубежное с устройств сразу получает отказ,
+российское работает как обычно. «Пускать напрямую» — зарубежное временно идёт через провайдера.</span></div>
 <div class="inline">
 $(if [ "$S_killtest" = 1 ]; then echo '<form method="post"><button class="pri" name="action" value="killtest_off">Остановить тест</button></form>'; else echo '<form method="post"><button name="action" value="killtest">Тест kill switch на 3 минуты</button></form>'; fi)
 </div>
@@ -425,14 +424,6 @@ cat <<EOF
 <button class="pri">Сохранить и применить</button></form>
 </div>
 <p class="mut" style="margin:12px 0 0">Предыдущая версия каждого файла сохраняется рядом как <code>.bak</code>.</p>
-</section>
-
-<section class="card">
-<h2><span class="b" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3v-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg></span>Контакт на заглушке</h2>
-<form method="post"><input type="hidden" name="action" value="contact">
-<label class="mut" for="contact" style="display:block;margin-bottom:8px">Показывается на заглушке в блоке «Кому написать».</label>
-<textarea id="contact" name="contact" rows="3" placeholder="Например: Иван, +7 900 000-00-00, Telegram @...">$(cat "$DIR/contact.txt" 2>/dev/null | esc)</textarea>
-<div class="inline" style="margin-top:10px"><button class="pri">Сохранить</button></div></form>
 </section>
 
 <section class="term" aria-label="Журнал">
