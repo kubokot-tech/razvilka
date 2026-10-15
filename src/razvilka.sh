@@ -497,6 +497,13 @@ EOF
 
 # ---------- сторож ----------
 
+# когда туннель последний раз сменил состояние (для страницы статуса): «1|0 <epoch>»
+TUNNEL_STATE=$DIR/tunnel_state
+mark_tunnel() {
+    date +%s > "$DIR/last_check"
+    [ "$(cut -d' ' -f1 "$TUNNEL_STATE" 2>/dev/null)" = "$1" ] || echo "$1 $(date +%s)" > "$TUNNEL_STATE"
+}
+
 watchdog() {
     [ -f "$ENABLED" ] || return 0
     guard_on
@@ -506,6 +513,7 @@ watchdog() {
     fi
     rm -f "$TEST_UNTIL"
     if tunnel_ok; then
+        mark_tunnel 1
         echo 0 > "$FAILS"
         [ -f "$KILL_FLAG" ] && { kill_off; log "туннель жив — kill switch снят"; }
         captive_off      # на всякий случай: заглушка не должна жить при живом туннеле
@@ -521,6 +529,7 @@ watchdog() {
         fi
     else
         f=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )); echo $f > "$FAILS"
+        [ "$f" -ge 2 ] && mark_tunnel 0
         [ "$f" -ge 2 ] || return 0      # две неудачи подряд (~2 мин)
         if [ "$(failmode)" != direct ]; then
             [ -f "$KILL_FLAG" ] || log "туннель не отвечает ($f проверки)"
@@ -599,6 +608,9 @@ status_kv() {
     echo "stub_port=$STUB_PORT"
     echo "direct_n=$(count_entries "$DIRECT_LIST")"
     echo "allow_n=$(wc -l < "$DIR/allow.resolved" 2>/dev/null || echo 0)"
+    echo "tunnel_since=$(cut -d' ' -f2 "$TUNNEL_STATE" 2>/dev/null)"
+    echo "last_check=$(cat "$DIR/last_check" 2>/dev/null)"
+    echo "now=$(date +%s)"
     echo "vpn_n=$(count_entries "$VPN_LIST")"
     echo "force_routes=$(ip route show table $FORCE_TABLE | wc -l)"
     echo "$(cat "$STATE" 2>/dev/null)" | tr ' ' '\n'

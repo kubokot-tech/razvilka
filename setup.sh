@@ -290,6 +290,7 @@ do_install() {
     install_file razvilka.sh "$DIR/razvilka.sh" 755
     install_file www/index.sh "$DIR/www/index.sh" 755
     install_file www/favicon.svg "$DIR/www/favicon.svg" 644
+    install_file www/status.sh "$DIR/www/status.sh" 755
     install_file init/S03razvilka /opt/etc/init.d/S03razvilka 755
     install_file init/S81razvilka-web /opt/etc/init.d/S81razvilka-web 755
     # хук netfilter.d больше не нужен (был частью kill switch, который вешал роутер) — убираем у старых установок
@@ -362,7 +363,7 @@ EOF
     echo
     "$DIR/razvilka.sh" status-kv | grep -E '^(tunnel|rule|failmode|ru|direct_n|vpn_n|servers)=' | sed 's/^/  /'
     sleep 1
-    if netstat -ltn 2>/dev/null | grep -q ":$WEB_PORT "; then c_ok "веб-морда: http://$LAN_IP:$WEB_PORT  (логин admin)"
+    if netstat -ltn 2>/dev/null | grep -q ":$WEB_PORT "; then c_ok "веб-морда: http://$LAN_IP:$WEB_PORT  (логин admin); статус без пароля: http://$LAN_IP:$WEB_PORT/status"
     else c_warn "веб-морда не поднялась — см. /opt/var/log/razvilka-web.log"; fi
     [ "${GENERATED:-0}" = 1 ] && c_warn "сгенерирован пароль веб-морды: $WEB_PASS  (сменить: повторить установку с --web-pass)"
     c_ok "заглушка: http://$LAN_IP:$STUB_PORT"
