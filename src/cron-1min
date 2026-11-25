@@ -1,2 +1,3 @@
 #!/bin/sh
 /opt/razvilka/razvilka.sh watchdog
+/opt/etc/init.d/S81razvilka-web start
