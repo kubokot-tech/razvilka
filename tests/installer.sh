@@ -49,7 +49,15 @@ chmod +x "$T/opt/etc/init.d/S70bird"
 echo unrelated > "$T/opt/etc/bird.conf"
 install_router() { sh "$T/setup.sh" install --yes --vpn-if tun0 --isp-if eth0 "$@"; }
 
-install_router --no-hostname --web-pass sample > "$T/install.out"
+mkdir -p "$T/sys/class/net/ppp0"
+cat > "$T/proc/net/route" <<'ROUTES'
+Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+eth0 00000000 010200C0 0003 0 0 0 00000080 0 0 0
+ppp0 00000000 00000000 0001 0 0 1000 00000000 0 0 0
+ROUTES
+sh "$T/setup.sh" install --yes --vpn-if tun0 --no-hostname --web-pass sample > "$T/install.out"
+grep -Fq 'ppp0 (маршрут без шлюза)' "$T/install.out"
+grep -Fxq 'ISP_IF="ppp0"' "$router/razvilka.conf"
 [ -f "$router/ipv6_block" ]
 [ -s "$router/lighttpd.conf.in" ]
 [ -x "$router/www/log.sh" ]
@@ -63,7 +71,9 @@ grep -qx unrelated "$T/opt/etc/bird.conf"
 rm -f "$router/ipv6_block"
 mkdir -p "$router/backups"
 echo history > "$router/backups/previous.tar.gz"
+echo 'eth0 00000000 010200C0 0003 0 0 10 00000000 0 0 0' >> "$T/proc/net/route"
 install_router > "$T/reinstall.out"
+grep -Fq 'eth0 (шлюз 192.0.2.1)' "$T/reinstall.out"
 [ ! -e "$router/ipv6_block" ]
 grep -qx 'HOSTNAME_LAN=""' "$router/razvilka.conf"
 grep -qx 'LAN_IF="br+"' "$router/razvilka.conf"

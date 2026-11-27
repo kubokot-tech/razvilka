@@ -32,14 +32,15 @@ list_map() {
 
 build_force() {
     priority_available "$FORCE_PRIO" "$FORCE_TABLE" || return 1
-    gw=$(isp_gw)
-    [ -z "$gw" ] && { log "списки: нет шлюза провайдера на $ISP_IF"; return 1; }
+    wan_route=$(isp_nexthop)
+    [ -n "$wan_route" ] || { log "списки: нет маршрута по умолчанию на $ISP_IF"; return 1; }
+    wan_state=$(isp_route_state "$wan_route")
     list_map "$DIRECT_LIST" > "$DIR/direct.map"
     list_map "$VPN_LIST" > "$DIR/vpn.map"
     awk '{print $1}' "$DIR/direct.map" | sort -u > "$DIR/direct.resolved"
     awk '{print $1}' "$DIR/vpn.map" | sort -u > "$DIR/vpn.resolved"
     {
-        awk -v gw="$gw" -v d="$ISP_IF" -v t="$FORCE_TABLE" '{print "route replace " $1 " via " gw " dev " d " table " t}' "$DIR/direct.resolved"
+        isp_prefix_routes "$wan_route" "$FORCE_TABLE" "$DIR/direct.resolved"
         if [ -f "$KILL_FLAG" ] && [ "${1:-}" != normal ]; then
             grep -vxF -f "$DIR/direct.resolved" "$DIR/vpn.resolved" | awk -v t="$FORCE_TABLE" '{print "route replace prohibit " $1 " table " t}'
         elif ip link show "$VPN_IF" >/dev/null 2>&1; then
@@ -49,7 +50,7 @@ build_force() {
     reconcile_routes "$DIR/force.batch" "$FORCE_TABLE" 'списки: ошибки ip -batch' || return 1
     n=$(table_count "$FORCE_TABLE") || return 1
     rule_ensure $FORCE_PRIO $FORCE_TABLE || { log 'списки: не удалось добавить ip rule'; return 1; }
-    echo "$n" > "$FORCE_STATE"
+    echo "$n $wan_state" > "$FORCE_STATE"
     flush_cache
     log "ручные списки: $(wc -l < "$DIR/direct.resolved") адресов напрямую, $(wc -l < "$DIR/vpn.resolved") через VPN (маршрутов $n)"
     return 0
@@ -57,7 +58,8 @@ build_force() {
 # маршруты списков пропадают, когда VPN-интерфейс пересоздаётся
 force_ok() {
     rule_status "$FORCE_PRIO" "$FORCE_TABLE" || return 1
-    want=$(cat "$FORCE_STATE" 2>/dev/null || echo 0)
+    [ -r "$FORCE_STATE" ] && read -r want saved_wan < "$FORCE_STATE" || return 1
+    [ "$saved_wan" = "$(isp_route_state "$(isp_nexthop)")" ] || return 1
     actual=$(table_count "$FORCE_TABLE") || return 1
     [ "$actual" -ge "$want" ]
 }

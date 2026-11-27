@@ -40,6 +40,8 @@ git clone https://github.com/kubokot-tech/razvilka && cd razvilka
 
 Установщик определяет интерфейсы автоматически. Параметры ниже позволяют выбрать их вручную или выполнить установку без вопросов.
 
+Для PPPoE подходит маршрут вида `default dev ppp0 scope link`. Если провайдер не указывает IP шлюза, Razvilka направляет трафик в `ppp0`. При нескольких WAN нужный интерфейс можно выбрать через `--isp-if`.
+
 ```sh
 sh razvilka-setup.sh install --yes --contact "Администратор домашней сети"
 ./install.sh root@192.168.1.1 -- --yes --contact "Иван, +7 900 000-00-00"

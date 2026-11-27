@@ -76,7 +76,8 @@ kill_on() {
     batch_apply "$DIR/kill.guard.batch" 'kill switch: не удалось установить prohibit' || return 1
     rule_ensure "$PRIO" "$TABLE" || return 1
     kill_mode=$(failmode)
-    kill_signature=$(printf '%s\n' "$kill_mode" "$(isp_gw)" "$(vpn_servers)"
+    wan_route=$(isp_nexthop)
+    kill_signature=$(printf '%s\n' "$kill_mode" "$(isp_route_state "$wan_route")" "$(vpn_servers)"
         [ ! -f "$RU_LIST" ] || sha256sum "$RU_LIST"
         [ "$kill_mode" != soft ] || [ ! -f "$DIR/allow.resolved" ] || sha256sum "$DIR/allow.resolved")
     kill_changed=0
@@ -84,15 +85,14 @@ kill_on() {
         build down || return 1
         kill_changed=1
     fi
-    gw=$(isp_gw)
     {
         echo "route replace prohibit default table $TABLE"
         # мягкий kill: разрешённое (CDN, шрифты, капча, свои записи) — напрямую
-        [ "$(failmode)" = soft ] && [ -n "$gw" ] && [ -f "$DIR/allow.resolved" ] \
-            && awk -v gw="$gw" -v d="$ISP_IF" -v t="$TABLE" '{print "route replace " $1 " via " gw " dev " d " table " t}' "$DIR/allow.resolved"
+        [ "$kill_mode" = soft ] && [ -n "$wan_route" ] && [ -f "$DIR/allow.resolved" ] \
+            && isp_prefix_routes "$wan_route" "$TABLE" "$DIR/allow.resolved"
         # публичные DNS — напрямую: иначе устройства с «зашитым» DNS (Android, Chromecast, ноутбуки)
         # потеряют и российские сайты
-        [ -n "$gw" ] && for r in $RESOLVERS; do echo "route replace $r via $gw dev $ISP_IF table $TABLE"; done
+        [ -n "$wan_route" ] && for r in $RESOLVERS; do echo "route replace $r $wan_route table $TABLE"; done
         [ -f "$DIR/vpn.resolved" ] && grep -vxF -f "$DIR/direct.resolved" "$DIR/vpn.resolved" 2>/dev/null \
             | awk -v t="$FORCE_TABLE" '{print "route replace prohibit " $1 " table " t}'
     } > "$DIR/kill.batch"

@@ -88,9 +88,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------- автоопределение (работает и без ip-full: через /proc и /sys) ----------
 
-default_route_ifaces() { awk 'NR>1 && $2=="00000000" {print $1}' /proc/net/route; }
+default_route_ifaces() { awk 'NR>1 && $2=="00000000" && $8=="00000000" {print $1}' /proc/net/route; }
 iface_gw() {  # шлюз интерфейса из /proc/net/route (hex little-endian -> a.b.c.d)
-    awk -v i="$1" 'NR>1 && $1==i && $2=="00000000" {g=$3; printf "%d.%d.%d.%d\n", "0x" substr(g,7,2), "0x" substr(g,5,2), "0x" substr(g,3,2), "0x" substr(g,1,2); exit}' /proc/net/route
+    awk -v i="$1" 'NR>1 && $1==i && $2=="00000000" && $8=="00000000" {g=$3; printf "%d.%d.%d.%d\n", "0x" substr(g,7,2), "0x" substr(g,5,2), "0x" substr(g,3,2), "0x" substr(g,1,2); exit}' /proc/net/route
 }
 vpn_candidates() { ls /sys/class/net 2>/dev/null | grep -E '^(opkgtun|nwg|wg|awg|tun|ovpn)[0-9]+$'; }
 iface_ok() { ping -I "$1" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -I "$1" -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; }
@@ -388,7 +388,12 @@ do_install() {
         [ -d "/sys/class/net/$VPN2_IF" ] || die "нет дополнительного VPN-интерфейса '$VPN2_IF'"
     fi
     if iface_ok "$VPN_IF"; then c_ok "VPN $VPN_IF отвечает"; else c_warn "VPN $VPN_IF сейчас не отвечает — поставлю, сторож включит, когда оживёт"; fi
-    c_ok "провайдер: $ISP_IF (шлюз $(iface_gw "$ISP_IF"))"
+    gateway=$(iface_gw "$ISP_IF")
+    case "$gateway" in
+        0.0.0.0) c_ok "провайдер: $ISP_IF (маршрут без шлюза)" ;;
+        '') c_warn "нет маршрута по умолчанию на $ISP_IF" ;;
+        *) c_ok "провайдер: $ISP_IF (шлюз $gateway)" ;;
+    esac
 
     temp_routes_on
     c_info "пакеты Entware: $PKGS"

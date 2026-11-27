@@ -44,7 +44,7 @@ watchdog() {
         echo 0 > "$FAILS"
         if [ -f "$KILL_FLAG" ]; then kill_off || return 1; fi
         captive_off
-        want="gw=$(isp_gw) servers=$(echo $(vpn_servers))"
+        want="$(isp_route_state "$(isp_nexthop)") servers=$(echo $(vpn_servers))"
         if ! table_ok || [ "$want" != "$(cat "$STATE" 2>/dev/null)" ]; then
             build || return 1
             build_force || watchdog_rc=1

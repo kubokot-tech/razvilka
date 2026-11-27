@@ -53,11 +53,11 @@ device_if_vars() {
 }
 device_build_table() {
     t=$1; primary_ok=$2; secondary_ok=$3
-    gw=$(isp_gw)
+    wan_route=$4
     spec=$(device_table_spec "$t")
     if [ -z "$spec" ]; then
         kind=direct
-        [ -z "$gw" ] && { log "устройства: нет шлюза провайдера на $ISP_IF"; return 1; }
+        [ -n "$wan_route" ] || { log "устройства: нет маршрута по умолчанию на $ISP_IF"; return 1; }
     else
         IFS='|' read -r kind vpn <<EOF
 $spec
@@ -76,10 +76,10 @@ EOF
         echo "route replace prohibit default metric 100 table $t"
         for p in $PRIVATE; do echo "route replace throw $p table $t"; done
         if [ "$kind" = direct ]; then
-            echo "route replace default via $gw dev $ISP_IF metric 10 table $t"
+            echo "route replace default $wan_route metric 10 table $t"
         else
-            for s in $servers; do [ -n "$gw" ] && echo "route replace $s/32 via $gw dev $ISP_IF table $t"; done
-            [ "$kind" = vpn ] && [ -n "$gw" ] && [ -s "$RU_LIST" ] && awk -v gw="$gw" -v d="$ISP_IF" -v t="$t" '{print "route replace " $1 " via " gw " dev " d " table " t}' "$RU_LIST"
+            for s in $servers; do [ -n "$wan_route" ] && echo "route replace $s/32 $wan_route table $t"; done
+            [ "$kind" = vpn ] && [ -n "$wan_route" ] && [ -s "$RU_LIST" ] && isp_prefix_routes "$wan_route" "$t" "$RU_LIST"
             [ "$selected_ok" = 1 ] && echo "route replace default dev $ifn metric 10 table $t"
         fi
     } > "$DIR/devices.$t.batch"
@@ -91,7 +91,9 @@ device_tables_ok() {
     t=$1; primary_ok=$2; secondary_ok=$3
     spec=$(device_table_spec "$t")
     if [ -z "$spec" ]; then
-        table_routes "$t" | grep -q "^default via .* dev $ISP_IF"
+        [ -n "$4" ] && table_routes "$t" | awk -v hop="$4" '
+            $1 == "default" { $1=$1; if (index($0 " ", "default " hop " ") == 1) found=1 }
+            END { exit !found }'
         return
     fi
     table_routes "$t" | grep -q '^prohibit default' || return 1
@@ -110,12 +112,12 @@ EOF
     fi
 }
 device_repair_table() {
-    t=$1; gw=$2
+    t=$1; wan_route=$2
     spec=$(device_table_spec "$t")
     {
         echo "route replace prohibit default metric 100 table $t"
         for p in $PRIVATE; do echo "route replace throw $p table $t"; done
-        [ -z "$spec" ] && [ -n "$gw" ] && echo "route replace default via $gw dev $ISP_IF metric 10 table $t"
+        [ -z "$spec" ] && [ -n "$wan_route" ] && echo "route replace default $wan_route metric 10 table $t"
     } > "$DIR/devices.$t.fallback.batch"
     reconcile_routes "$DIR/devices.$t.fallback.batch" "$t" "устройства: ошибка fallback для table $t" || return 1
     table_routes "$t" | grep -q '^prohibit default' && table_routes "$t" | grep -q '^throw'
@@ -142,14 +144,15 @@ device_apply() {
         tunnel_ok "$VPN_IF" && primary_ok=1
         [ -n "$VPN2_IF" ] && tunnel_ok "$VPN2_IF" && secondary_ok=1
     fi
-    want="gw=$(isp_gw) primary_ok=$primary_ok secondary_ok=$secondary_ok servers=$(echo $(vpn_servers)) servers2=$(echo $(vpn_servers "$VPN2_IF" "$VPN2_SERVERS_EXTRA" "$VPN2_PROCESS")) ru=$(date -r "$RU_LIST" +%s 2>/dev/null) devices=$(date -r "$DEVICES_FILE" +%s 2>/dev/null)"
+    wan_route=$(isp_nexthop)
+    want="$(isp_route_state "$wan_route") primary_ok=$primary_ok secondary_ok=$secondary_ok servers=$(echo $(vpn_servers)) servers2=$(echo $(vpn_servers "$VPN2_IF" "$VPN2_SERVERS_EXTRA" "$VPN2_PROCESS")) ru=$(date -r "$RU_LIST" +%s 2>/dev/null) devices=$(date -r "$DEVICES_FILE" +%s 2>/dev/null)"
     rebuild=0
     [ "$want" = "$(cat "$DIR/devices.state" 2>/dev/null)" ] || rebuild=1
-    for t in $needed; do device_tables_ok "$t" "$primary_ok" "$secondary_ok" || rebuild=1; done
+    for t in $needed; do device_tables_ok "$t" "$primary_ok" "$secondary_ok" "$wan_route" || rebuild=1; done
     if [ "$rebuild" = 1 ]; then
         for t in $needed; do
-            if ! device_build_table "$t" "$primary_ok" "$secondary_ok"; then
-                device_repair_table "$t" "$(isp_gw)" || return 1
+            if ! device_build_table "$t" "$primary_ok" "$secondary_ok" "$wan_route"; then
+                device_repair_table "$t" "$wan_route" || return 1
                 [ -n "$(device_table_spec "$t")" ] || return 1
             fi
         done

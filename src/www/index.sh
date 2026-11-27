@@ -452,7 +452,7 @@ cat <<EOF
 <div class="tile"><span class="k">AI-защита</span><span class="v">$(if [ "$S_ai_protect" != 1 ]; then echo "выключена"; elif [ "$S_ai_active" = 1 ]; then echo "включена · ${S_ai_routes:-0} адресов"; else echo "ошибка применения"; fi)</span>$([ "${S_ai_failed:-0}" -gt 0 ] && echo "<small>Без ответа DNS — $S_ai_failed. Роутер сохранил прежние адреса.</small>")</div>
 <div class="tile"><span class="k">Отдельные устройства</span><span class="v">${S_devices_n:-0}</span>$([ "${S_devices_n:-0}" -gt 0 ] && { [ "$S_devices_active" = 1 ] && echo '<small>индивидуальные правила применены</small>' || echo '<small>проверьте правила в диагностике</small>'; })</div>
 <div class="tile"><span class="k">Внешний IPv6</span><span class="v">$([ "$S_ipv6_blocked" = 1 ] && echo "заблокирован" || echo "разрешён")</span></div>
-<div class="tile"><span class="k">Шлюз провайдера</span><span class="v">${S_gw:-—}</span></div>
+<div class="tile"><span class="k">Выход к провайдеру</span><span class="v">${S_gw:-${S_wan_dev:-—}}</span>$([ -z "$S_gw" ] && [ -n "$S_wan_dev" ] && echo '<small>маршрут без шлюза</small>')</div>
 </div>
 
 <section class="card check" id="check">

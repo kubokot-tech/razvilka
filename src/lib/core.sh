@@ -88,7 +88,7 @@ ASN_DIR=$DIR/asn           # кэш подсетей автономных сис
 ASN_TTL=86400              # обновлять раз в сутки
 ASN_API="https://stat.ripe.net/data/announced-prefixes/data.json?resource="
 ENABLED=$DIR/enabled
-STATE=$DIR/state          # gw и vpn-сервер, с которыми строилась таблица
+STATE=$DIR/state          # маршрут провайдера и VPN-серверы, с которыми строилась таблица
 FORCE_STATE=$DIR/force_state
 FAILS=$DIR/fails          # подряд неудачных проверок туннеля
 MODE_FILE=$DIR/failmode   # kill | direct
@@ -177,8 +177,32 @@ build_allow() {
     mv "$DIR/allow.new" "$DIR/allow.resolved"
 }
 
-isp_gw() {
-    ip route show table main default | awk -v d="$ISP_IF" '$0 ~ "dev " d {for (i=1;i<NF;i++) if ($i=="via") {print $(i+1); exit}}'
+isp_nexthop() {
+    # PPPoE: "default dev ppp0 scope link". Пустой результат означает, что маршрута нет.
+    ip route show table main default | awk -v iface="$ISP_IF" '
+        $1 == "default" || $1 == "nexthop" {
+            gw = dev = ""
+            for (i=2; i<NF; i++) {
+                if ($i == "via") gw = $(i+1)
+                if ($i == "dev") dev = $(i+1)
+            }
+            if (dev == iface) {
+                if (gw != "") printf "via %s ", gw
+                print "dev " dev
+                exit
+            }
+        }'
+}
+
+isp_route_state() (
+    gw=
+    case "$1" in "via "*) gw=${1#via }; gw=${gw%% *} ;; esac
+    # После пересоздания ppp0 имя прежнее, а ядро удалило маршруты старого интерфейса.
+    printf 'gw=%s wan_dev=%s wan_index=%s' "$gw" "${1##* }" "$(cat "/sys/class/net/$ISP_IF/ifindex" 2>/dev/null)"
+)
+
+isp_prefix_routes() {  # nexthop, таблица, файл префиксов
+    awk -v hop="$1" -v t="$2" '{print "route replace " $1 " " hop " table " t}' "$3"
 }
 
 # dig, а не nslookup: busybox nslookup дописывает после IP имя из PTR-записи
@@ -249,10 +273,11 @@ download() {
 build() {
     priority_available "$PRIO" "$TABLE" || return 1
     down=${1:-}
-    gw=$(isp_gw)
+    wan_route=$(isp_nexthop)
+    wan_state=$(isp_route_state "$wan_route")
     servers=$(vpn_servers)
     if [ "$down" != down ]; then
-        [ -n "$gw" ] || { log "нет шлюза провайдера на $ISP_IF"; return 1; }
+        [ -n "$wan_route" ] || { log "нет маршрута по умолчанию на $ISP_IF"; return 1; }
         ip link show "$VPN_IF" >/dev/null 2>&1 || { log "нет интерфейса $VPN_IF"; return 1; }
         [ -n "$servers" ] || { log "не нашёл адрес VPN-сервера, задайте VPN_SERVERS_EXTRA"; return 1; }
         [ -s "$RU_LIST" ] || download || return 1
@@ -264,15 +289,15 @@ build() {
         for p in $PRIVATE; do
             echo "route replace throw $p table $TABLE"
         done
-        if [ -n "$gw" ]; then
-            for s in $servers; do echo "route replace $s/32 via $gw dev $ISP_IF table $TABLE"; done
-            [ ! -s "$RU_LIST" ] || awk -v gw="$gw" -v d="$ISP_IF" -v t="$TABLE" '{print "route replace " $1 " via " gw " dev " d " table " t}' "$RU_LIST"
+        if [ -n "$wan_route" ]; then
+            for s in $servers; do echo "route replace $s/32 $wan_route table $TABLE"; done
+            [ ! -s "$RU_LIST" ] || isp_prefix_routes "$wan_route" "$TABLE" "$RU_LIST"
         fi
         [ "$down" = down ] || echo "route replace default dev $VPN_IF metric 10 table $TABLE"
     } > "$DIR/batch"
     reconcile_routes "$DIR/batch" "$TABLE" 'основная таблица: ошибка ip -batch' || return 1
     flush_cache
-    echo "gw=$gw servers=$(echo $servers)" > "$STATE"
+    echo "$wan_state servers=$(echo $servers)" > "$STATE"
     log "таблица $TABLE обновлена"
 }
 

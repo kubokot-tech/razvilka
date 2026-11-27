@@ -10,7 +10,9 @@ DIG_IP=203.0.113.10
 setup_router() {
     T=$BASE/$1
     mkdir -p "$T/lists"
-    sed -e "s|^DIR=/opt/razvilka$|DIR=$T|" -e "s|^LOG=/opt/var/log/razvilka.log$|LOG=$T/razvilka.log|" "$ROOT/src/razvilka.sh" > "$T/razvilka.sh"
+    sed -e "s|^DIR=/opt/razvilka$|DIR=$T|" -e "s|^LOG=/opt/var/log/razvilka.log$|LOG=$T/razvilka.log|" \
+        -e "s|/sys/class/net/|$T/sys/class/net/|g" "$ROOT/src/razvilka.sh" > "$T/razvilka.sh"
+    echo 'default via 192.0.2.1 dev eth3' > "$T/wan-defaults"
     : > "$T/rules"; : > "$T/routes1022"; : > "$T/routes1020"; : > "$T/routes1019"; for n in 1030 1031 1032 1033 1034 1035 1036; do : > "$T/routes$n"; done
     echo kill > "$T/failmode"
     echo '81.0.0.0/8' > "$T/ru.cidr"
@@ -31,7 +33,7 @@ ip() {
     [ -f "$T/fail-rule-add" ] && [ "$1 $2" = 'rule add' ] && [ "$(cat "$T/fail-rule-add")" = "$*" ] && return 1
     case "$*" in
         "rule show") cat "$T/rules" ;;
-        "route show table main default") echo 'default via 192.0.2.1 dev eth3' ;;
+        "route show table main default") cat "$T/wan-defaults" ;;
         "neigh show") echo '192.168.1.70 dev br0 lladdr aa:bb:cc:dd:ee:01 REACHABLE' ;;
         "link show opkgtun0") [ -f "$T/vpn-present" ] ;;
         "link show nwg1") [ -f "$T/vpn2-present" ] ;;
@@ -124,6 +126,68 @@ source_router() {
 refute() {
     if "$@"; then return 1; fi
     return 0
+}
+
+pppoe_routing() {
+    set -e
+    setup_router pppoe
+    printf '%s\n' 'default via 192.0.2.1 dev ppp01' 'default dev ppp0  scope link  metric 1000' > "$T/wan-defaults"
+    echo 'ISP_IF="ppp0"' >> "$T/razvilka.conf"
+    mkdir -p "$T/sys/class/net/ppp0"
+    echo 10 > "$T/sys/class/net/ppp0/ifindex"
+    echo direct > "$T/failmode"
+    touch "$T/vpn-present"
+    echo '203.0.113.7' > "$T/lists/direct.list"
+    printf '%s\n' '192.168.1.50|direct|primary|TV' '192.168.1.51|vpn|primary|PC' > "$T/devices.conf"
+    router start
+    grep -Fxq 'default dev opkgtun0 metric 10' "$T/routes1022"
+    grep -Fxq '81.0.0.0/8 dev ppp0' "$T/routes1022"
+    grep -Fxq '198.51.100.1 dev ppp0' "$T/routes1022"
+    grep -Fxq '203.0.113.7 dev ppp0' "$T/routes1020"
+    grep -Fxq 'default dev ppp0 metric 10' "$T/routes1030"
+    grep -Fxq '81.0.0.0/8 dev ppp0' "$T/routes1031"
+    grep -Fxq '198.51.100.1 dev ppp0' "$T/routes1031"
+    router status-kv > "$T/status"
+    grep -Fxq 'gw=' "$T/status"
+    grep -Fxq 'wan_dev=ppp0' "$T/status"
+
+    # Kernel drops routes on interface deletion. A reconnect may happen between watchdog runs.
+    echo 11 > "$T/sys/class/net/ppp0/ifindex"
+    for table in 1020 1022 1030 1031; do
+        awk '!/dev ppp0/' "$T/routes$table" > "$T/kept"; mv "$T/kept" "$T/routes$table"
+    done
+    router watchdog
+    grep -Fxq '198.51.100.1 dev ppp0' "$T/routes1022"
+    grep -Fxq '203.0.113.7 dev ppp0' "$T/routes1020"
+    grep -Fxq 'default dev ppp0 metric 10' "$T/routes1030"
+    grep -Fxq '81.0.0.0/8 dev ppp0' "$T/routes1031"
+
+    echo '198.51.100.0/24' > "$T/allow.resolved"
+    rm "$T/vpn-present"
+    router mode soft
+    router watchdog
+    grep -Fxq 'prohibit default' "$T/routes1022"
+    grep -Fxq '1.1.1.1 dev ppp0' "$T/routes1022"
+    grep -Fxq '198.51.100.0/24 dev ppp0' "$T/routes1022"
+    router mode kill
+    refute grep -Fq '198.51.100.0/24' "$T/routes1022"
+    grep -Fxq '81.0.0.0/8 dev ppp0' "$T/routes1022"
+    touch "$T/vpn-present"
+    router watchdog
+    grep -Fxq 'default dev opkgtun0 metric 10' "$T/routes1022"
+}
+
+missing_wan_default() {
+    set -e
+    setup_router no-wan-default
+    echo 'ISP_IF="ppp0"' >> "$T/razvilka.conf"
+    echo 'default via 192.0.2.1 dev ppp01' > "$T/wan-defaults"
+    touch "$T/vpn-present"
+    echo direct > "$T/failmode"
+    source_router start
+    [ "$RC" -ne 0 ]
+    grep -Fq 'нет маршрута по умолчанию на ppp0' "$T/razvilka.log"
+    refute grep -Eq 'dev ppp0|via 192\.0\.2\.1' "$T/routes1022" "$T/routes1020"
 }
 
 kill_boot_without_vpn() {
@@ -583,6 +647,8 @@ run_test() {
 }
 
 run_test 'strict kill is fail-closed at boot without a VPN interface' kill_boot_without_vpn
+run_test 'PPPoE WAN routes work on start, reconnect, VPN failure and recovery' pppoe_routing
+run_test 'missing WAN default is distinct from an on-link default' missing_wan_default
 run_test 'strict mode removes soft exceptions and repeated checks preserve sessions' kill_mode_transition
 run_test 'service restart and boot preserve routing and IPv6 preferences' init_preserves_preferences
 run_test 'disabled scheme rejects a kill test' disabled_killtest_leaves_routing_off
