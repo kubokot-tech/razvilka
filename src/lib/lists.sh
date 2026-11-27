@@ -30,15 +30,38 @@ list_map() {
     done
 }
 
+# При временной ошибке DNS или RIPEstat сохраняем адреса только для оставшихся в списке записей.
+refresh_vpn_list() (
+    source_file=$VPN_LIST; [ -f "$source_file" ] || source_file=/dev/null
+    cp "$source_file" "$DIR/vpn.source.new" || exit 1
+    list_map "$DIR/vpn.source.new" > "$DIR/vpn.fresh" || exit 1
+    previous=$DIR/vpn.map; [ -f "$previous" ] || previous=/dev/null
+    : > "$DIR/vpn.missing.new" || exit 1
+    awk -v missing="$DIR/vpn.missing.new" '
+        FILENAME==ARGV[1] {
+            sub(/#.*/, ""); gsub(/[[:space:]]/, "")
+            if (tolower($0) ~ /^as[0-9]+$/) $0=toupper($0)
+            if (length($0)) needed[$0]=1
+            next
+        }
+        FILENAME==ARGV[2] { fresh[$2]=1; print; next }
+        ($2 in needed) && !($2 in fresh) { cached[$2]=1; print }
+        END { for (e in needed) if (!(e in fresh) && !(e in cached)) print e > missing }
+    ' "$DIR/vpn.source.new" "$DIR/vpn.fresh" "$previous" > "$DIR/vpn.map.new" || exit 1
+    awk '{print $1}' "$DIR/vpn.map.new" | sort -u > "$DIR/vpn.resolved.new" || exit 1
+    sha256sum < "$DIR/vpn.source.new" > "$DIR/vpn.source.sum.new" || exit 1
+    for f in vpn.map vpn.resolved vpn.missing vpn.source.sum; do mv "$DIR/$f.new" "$DIR/$f" || exit 1; done
+    rm -f "$DIR/vpn.source.new" "$DIR/vpn.fresh"
+)
+
 build_force() {
     priority_available "$FORCE_PRIO" "$FORCE_TABLE" || return 1
     wan_route=$(isp_nexthop)
     [ -n "$wan_route" ] || { log "списки: нет маршрута по умолчанию на $ISP_IF"; return 1; }
     wan_state=$(isp_route_state "$wan_route")
     list_map "$DIRECT_LIST" > "$DIR/direct.map"
-    list_map "$VPN_LIST" > "$DIR/vpn.map"
+    refresh_vpn_list || return 1
     awk '{print $1}' "$DIR/direct.map" | sort -u > "$DIR/direct.resolved"
-    awk '{print $1}' "$DIR/vpn.map" | sort -u > "$DIR/vpn.resolved"
     {
         isp_prefix_routes "$wan_route" "$FORCE_TABLE" "$DIR/direct.resolved"
         if [ -f "$KILL_FLAG" ] && [ "${1:-}" != normal ]; then

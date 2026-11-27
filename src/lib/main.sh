@@ -117,7 +117,8 @@ case "$1" in
     lists)
         rc=0
         [ "${2:-}" = refresh ] && ASN_REFRESH=1
-        if scheme_running; then build_force || rc=1; fi
+        if scheme_running; then build_force || rc=1
+        elif device_entries | grep -Fq '|vpn-list|'; then refresh_vpn_list || rc=1; fi
         if tunnel_ok; then build_allow || rc=1; fi
         device_apply || rc=1
         ai_refresh || rc=1; ai_apply || rc=1
@@ -187,6 +188,6 @@ case "$1" in
         tail -n 8 "$LOG" 2>/dev/null
         ;;
     *)
-        echo "usage: $0 start|stop|update|lists [refresh]|ai-on|ai-off|ai-refresh|ai-apply|backup|restore FILE|neighbors|ipv6-block on\|off|device-set IP default\|direct\|vpn\|vpn-all [primary\|secondary] [NAME]|device-del IP|device-apply|doctor|why IP|watchdog|mode direct|soft|kill|killtest N|off|stub|netfilter|vpn-restart|status"; exit 1
+        echo "usage: $0 start|stop|update|lists [refresh]|ai-on|ai-off|ai-refresh|ai-apply|backup|restore FILE|neighbors|ipv6-block on\|off|device-set IP default\|direct\|vpn\|vpn-all\|vpn-list [primary\|secondary] [NAME]|device-del IP|device-apply|doctor|why IP|watchdog|mode direct|soft|kill|killtest N|off|stub|netfilter|vpn-restart|status"; exit 1
         ;;
 esac

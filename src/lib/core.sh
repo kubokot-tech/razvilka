@@ -3,7 +3,7 @@
 # Ставится инсталлятором (razvilka-setup.sh), настройки — /opt/razvilka/razvilka.conf.
 #
 # Порядок правил маршрутизации (первое совпадение выигрывает):
-#   30016 -> table 1030–1036   индивидуальные политики: direct, primary/secondary VPN, fail-closed
+#   30016 -> table 1030–1038   индивидуальные политики: direct, primary/secondary VPN, fail-closed
 #   30017 -> table 1019   AI-защита: VPN metric 10 + постоянный prohibit metric 100
 #   30020 -> table 1020   ручные списки: lists/direct.list (напрямую), lists/vpn.list (через VPN);
 #                         записи — домен, IP, подсеть или автономная система (AS13238)
@@ -77,8 +77,10 @@ DEV_VPN_TABLE=1031
 DEV_VPN2_TABLE=1033
 DEV_ALL_TABLE=1034
 DEV_ALL2_TABLE=1036
+DEV_LIST_TABLE=1037
+DEV_LIST2_TABLE=1038
 DEV_LEGACY_TABLES="1032 1035"
-DEV_TABLES="$DEV_DIRECT_TABLE $DEV_VPN_TABLE $DEV_VPN2_TABLE $DEV_ALL_TABLE $DEV_ALL2_TABLE $DEV_LEGACY_TABLES"
+DEV_TABLES="$DEV_DIRECT_TABLE $DEV_VPN_TABLE $DEV_VPN2_TABLE $DEV_ALL_TABLE $DEV_ALL2_TABLE $DEV_LIST_TABLE $DEV_LIST2_TABLE $DEV_LEGACY_TABLES"
 SET=razvilka_direct          # ipset для правила заглушки (см. блок kill switch)
 LISTS=$DIR/lists
 DIRECT_LIST=$LISTS/direct.list
@@ -101,8 +103,7 @@ SOURCES="https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone
 https://raw.githubusercontent.com/ipverse/rir-ip/master/country/ru/ipv4-aggregated.txt"
 
 # Не трогаем локальное и служебное: throw -> поиск продолжается в main.
-PRIVATE="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16
-172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
+PRIVATE="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
 
 # Публичные DNS: при упавшем VPN пускаем напрямую, иначе устройства с «зашитым»
 # DNS (Android, Chromecast, ТВ) потеряют и российские сайты.

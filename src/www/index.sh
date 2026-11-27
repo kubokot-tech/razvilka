@@ -105,7 +105,7 @@ if [ "$REQUEST_METHOD" = POST ]; then
             neighbor=$(param neighbor "$body" | tr -cd '0-9.' | head -c 15)
             [ -n "$neighbor" ] && ip=$neighbor
             policy=$(param policy "$body")
-            case "$policy" in default|direct|vpn|vpn-all) ;; *) redirect device_error ;; esac
+            case "$policy" in default|direct|vpn|vpn-all|vpn-list) ;; *) redirect device_error ;; esac
             name=$(param name "$body" | tr -d '|\r\n' | head -c 80)
             if [ -z "$name" ] && [ -n "$neighbor" ]; then
                 name=$($FVPN neighbors 2>/dev/null | awk -F'|' -v ip="$neighbor" '$1 == ip {print $3; exit}')
@@ -164,6 +164,9 @@ if [ "$REQUEST_METHOD" = POST ]; then
                 lc ~ /^as[0-9]+$/ { u=toupper(lc); if (!seen[u]++) print u cm; next }
                 lc ~ /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]*[a-z][a-z0-9-]*$/ { if (!seen[lc]++) print lc cm; next }
                 { print line > bad }' > "$f.new"
+            if [ "$l" = vpn ] && [ "$(param add_google "$body")" = 1 ]; then
+                grep -Eq '^AS15169([[:space:]]|$)' "$f.new" || printf '%s\n' 'AS15169  # Google, включая YouTube' >> "$f.new"
+            fi
             cp -p "$f" "$f.bak" 2>/dev/null
             mv "$f.new" "$f"
             echo "$l" > "$DIR/last_save_list"
@@ -495,6 +498,8 @@ if [ -n "$host" ]; then
             elif [ "$blocked" = 1 ]; then why="Маршрутизация запрещает выход с этого устройства"
             elif [ -z "$dev" ]; then why="Не удалось определить маршрут"
             else case "$tbl:$dev" in
+                1037:"$S_vpn_if"|1038:"$S_vpn2_if") why="адрес из VPN-списка для этого устройства" ;;
+                1037:*|1038:*)    why="для устройства выбран прямой маршрут по умолчанию" ;;
                 1030:*)           why="индивидуальная политика устройства: напрямую" ;;
                 103*:"$S_vpn_if"|103*:"$S_vpn2_if") why="индивидуальная политика устройства: через VPN" ;;
                 1019:"$S_vpn_if") why="AI-защита: только через VPN" ;;
@@ -525,7 +530,7 @@ if [ -n "$host" ]; then
         echo "<p class=\"rsum\"><b>$host</b> · ${parts#, }</p>"
         if [ -z "$isip" ]; then
             case "$inl" in
-                *direct*vpn*) echo '<p class="rdom">Домен записан в обоих списках — действует «напрямую».</p>' ;;
+                *direct*vpn*) echo '<p class="rdom">Домен записан в обоих списках. Фактический маршрут показан выше.</p>' ;;
                 *direct*) echo '<p class="rdom">Домен записан в списке <span class="chip isp">напрямую</span></p>' ;;
                 *vpn*)    echo '<p class="rdom">Домен записан в списке <span class="chip vpn">через VPN</span></p>' ;;
                 *)        echo '<p class="rdom mut">Для этого домена нет отдельной записи.</p>' ;;
@@ -597,14 +602,14 @@ $(if [ "$msg" = backup_done ]; then f=$(param file "$q" | tr -cd 'A-Za-z0-9._-')
 
 <section class="card" id="devices">
 <h2><span class="b" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span id="devices-title">Отдельные устройства</span></h2>
-<p class="mut">Правило привязано к IPv4 устройства и имеет приоритет перед ручными списками и AI-защитой. Закрепите адрес устройства в настройках DHCP роутера. Если выбранный VPN недоступен, соединения, которым нужен этот туннель, блокируются.</p>
+<p class="mut">Правило привязано к IPv4 устройства и имеет приоритет перед ручными списками и AI-защитой. Закрепите адрес устройства в настройках DHCP роутера. В режиме «Всё напрямую, кроме списка VPN» через выбранный туннель идут адреса из <a href="#l-vpn">списка «Всегда через VPN»</a>. Если туннель упадёт, эти адреса будут заблокированы, остальные останутся доступны через провайдера.</p>
 <div class="table-container">
 <div class="table-wrapper" tabindex="0" role="region" aria-labelledby="devices-title">
 <table><thead><tr><th id="dev-col-name">Устройство</th><th id="dev-col-ip">IPv4</th><th id="dev-col-policy">Политика</th><th id="dev-col-vpn">VPN</th><th id="dev-col-actions">Действия</th></tr></thead><tbody>
 $(
 if [ -f "$DIR/devices.conf" ]; then
     while IFS='|' read -r dip dpo f3 f4 f5; do
-        if [ "$dpo" != direct ] && [ "$dpo" != vpn ] && [ "$dpo" != vpn-all ]; then continue; fi
+        case "$dpo" in (direct|vpn|vpn-all|vpn-list) ;; (*) continue ;; esac
         valid_ipv4 "$dip" || continue
         if [ "$f3" = primary ] || [ "$f3" = secondary ]; then
             dvpn=$f3
@@ -613,8 +618,8 @@ if [ -f "$DIR/devices.conf" ]; then
         dkey=$(printf '%s' "$dip" | tr '.-' '__'); de=$(printf '%s' "$dip" | esc); dnesc=$(printf '%s' "$dn" | esc)
         printf '<tr><th scope="row" headers="dev-col-name"><form id="dev-%s" method="post" action="?"><input type="hidden" name="ip" value="%s"></form><input form="dev-%s" name="name" maxlength="80" value="%s" aria-label="Название устройства %s"></th>' "$dkey" "$de" "$dkey" "$dnesc" "$dnesc"
         printf '<td headers="dev-col-ip"><code>%s</code></td><td headers="dev-col-policy"><select form="dev-%s" name="policy" aria-label="Политика для %s">' "$de" "$dkey" "$dnesc"
-        printf '<option value="default"%s>Как для всех</option><option value="direct"%s>Всегда напрямую</option><option value="vpn"%s>Зарубежное через VPN</option><option value="vpn-all"%s>Весь трафик через VPN</option></select></td>' \
-            "$([ "$dpo" = default ] && echo ' selected')" "$([ "$dpo" = direct ] && echo ' selected')" "$([ "$dpo" = vpn ] && echo ' selected')" "$([ "$dpo" = vpn-all ] && echo ' selected')"
+        printf '<option value="default"%s>Как для всех</option><option value="direct"%s>Всегда напрямую</option><option value="vpn"%s>Зарубежное через VPN</option><option value="vpn-all"%s>Весь трафик через VPN</option><option value="vpn-list"%s>Всё напрямую, кроме списка VPN</option></select></td>' \
+            "$([ "$dpo" = default ] && echo ' selected')" "$([ "$dpo" = direct ] && echo ' selected')" "$([ "$dpo" = vpn ] && echo ' selected')" "$([ "$dpo" = vpn-all ] && echo ' selected')" "$([ "$dpo" = vpn-list ] && echo ' selected')"
         printf '<td headers="dev-col-vpn"><select form="dev-%s" name="vpn" aria-label="VPN для %s"><option value="primary"%s>Основной: %s</option><option value="secondary"%s%s>Дополнительный: %s</option></select></td>' \
             "$dkey" "$dnesc" "$([ "$dvpn" = primary ] && echo ' selected')" "$S_vpn_if" "$([ "$dvpn" = secondary ] && echo ' selected')" "$([ -z "$S_vpn2_if" ] && echo ' disabled')" "${S_vpn2_if:-не настроен}"
         printf '<td headers="dev-col-actions"><div class="actions-cell"><button form="dev-%s" type="submit" name="action" value="device_save">Сохранить</button><button form="dev-%s" class="danger" type="submit" name="action" value="device_delete">Удалить</button></div></td></tr>' "$dkey" "$dkey"
@@ -633,7 +638,7 @@ $(if [ -n "$($FVPN neighbors 2>/dev/null)" ]; then
 fi)
 <label>Название<input name="name" maxlength="80" placeholder="Рабочий ноутбук"></label>
 <label>IPv4-адрес вручную<input name="ip" inputmode="decimal" pattern="[0-9.]{7,15}" maxlength="15" placeholder="192.168.1.50"></label>
-<label>Политика<select name="policy"><option value="vpn">Зарубежное через VPN</option><option value="vpn-all">Весь трафик через VPN</option><option value="direct">Всегда напрямую</option></select></label>
+<label>Политика<select name="policy"><option value="vpn">Зарубежное через VPN</option><option value="vpn-all">Весь трафик через VPN</option><option value="direct">Всегда напрямую</option><option value="vpn-list">Всё напрямую, кроме списка VPN</option></select></label>
 <label>VPN<select name="vpn"><option value="primary">Основной: $S_vpn_if</option><option value="secondary"$([ -z "$S_vpn2_if" ] && echo ' disabled')>Дополнительный: ${S_vpn2_if:-не настроен}</option></select></label>
 <button class="pri" type="submit">Добавить устройство</button>
 </form>
@@ -663,7 +668,10 @@ fi)
 <form method="post" class="list vpn"><input type="hidden" name="action" value="save_list"><input type="hidden" name="list" value="vpn">
 <div class="lh"><label class="tag" for="l-vpn"><i></i>Всегда через VPN</label><span class="fn">vpn.list</span></div>
 <textarea id="l-vpn" name="content" rows="10" spellcheck="false" autocapitalize="off">$(cat "$LISTS/vpn.list" 2>/dev/null | esc)</textarea>
-<button class="pri">Сохранить и применить</button></form>
+$(if [ -s "$DIR/vpn.missing" ]; then printf '<details><summary>Для некоторых записей пока нет IPv4-маршрута</summary><pre>'; esc < "$DIR/vpn.missing"; printf '</pre><p>Проверьте запись и нажмите «Сохранить и применить». До получения адресов для неё действует обычный маршрут устройства.</p></details>'; fi)
+<button class="pri">Сохранить и применить</button>
+<button name="add_google" value="1">Добавить сети Google для YouTube и применить</button>
+<p class="mut">В общий VPN-список будет добавлена AS15169. Через VPN пойдут и другие сервисы на этих IP. Видеокэши в сетях провайдеров могут использовать другие адреса.</p></form>
 </div>
 <p class="mut" style="margin:12px 0 0">Предыдущая версия каждого файла сохраняется рядом как <code>.bak</code>.</p>
 </section>

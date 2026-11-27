@@ -160,6 +160,29 @@ public_status_requires_rule_for_success() {
     awk '/Основной VPN работает/{found=1} END{exit found}' "$T/status-rule.out"
     awk '/VPN отвечает, маршрут ещё не включён/{found=1} END{exit !found}' "$T/status-rule.out"
 }
+vpn_list_device_and_google_preset() {
+    set -e
+    post_page tv.out 'action=device_save&ip=192.168.1.60&policy=vpn-list&vpn=primary&name=TV' 'http://192.168.1.1:98' "razvilka_csrf=$TOKEN"
+    grep -Fq 'Location: ?msg=device_saved' "$T/tv.out"
+    grep -Fxq 'device-set 192.168.1.60 vpn-list primary TV' "$T/actions"
+    echo '192.168.1.60|vpn-list|primary|TV' > "$T/devices.conf"
+    echo 'unknown.example' > "$T/vpn.missing"
+    get_page tv-form.out
+    grep -Fq 'value="vpn-list" selected>Всё напрямую, кроме списка VPN' "$T/tv-form.out"
+    grep -Fq 'value="vpn-list">Всё напрямую, кроме списка VPN' "$T/tv-form.out"
+    grep -Fq 'unknown.example' "$T/tv-form.out"
+    grep -Fq 'name="add_google" value="1"' "$T/tv-form.out"
+    rm "$T/vpn.missing"
+    post_page list.out 'action=save_list&list=vpn&content=example.com' 'http://192.168.1.1:98' "razvilka_csrf=$TOKEN"
+    [ "$(cat "$T/lists/vpn.list")" = 'example.com' ]
+    for content in 'example.com' 'example.com%0Aas15169%20%23%20Google'; do
+        post_page google.out "action=save_list&list=vpn&add_google=1&content=$content" 'http://192.168.1.1:98' "razvilka_csrf=$TOKEN"
+        grep -Fq 'Location: ?msg=saved' "$T/google.out"
+        grep -Fxq 'example.com' "$T/lists/vpn.list"
+        [ "$(grep -c '^AS15169' "$T/lists/vpn.list")" = 1 ]
+    done
+}
+
 list_busy_preserves_context() {
     set -e
     : > "$T/busy-lists"
@@ -417,6 +440,7 @@ run_test 'rendered AI form contains its action' rendered_ai_form_contains_action
 run_test 'failed actions show busy or error instead of success' failed_actions_show_busy_or_error
 run_test 'invalid device HTML is not rendered' invalid_device_is_not_rendered
 run_test 'public status requires the main rule for success' public_status_requires_rule_for_success
+run_test 'TV policy and optional shared Google preset save through the panel' vpn_list_device_and_google_preset
 run_test 'busy list apply preserves file and lookup context' list_busy_preserves_context
 run_test 'mobile table headers stay in accessibility tree' mobile_headers_stay_in_accessibility_tree
 run_test 'mobile device cards do not clip or stick' mobile_device_cards_do_not_clip_or_stick

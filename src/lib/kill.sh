@@ -43,6 +43,11 @@ captive_on() {
     [ "$(grep -c '^add' "$DIR/ipset.restore")" -gt 1000 ] || { log "заглушка: в наборе подозрительно мало сетей — без неё"; captive_off; return 0; }
     iptables -t nat -N $CAPTIVE_CHAIN 2>/dev/null
     iptables -t nat -F $CAPTIVE_CHAIN
+    # У телевизора с прямым выходом HTTP к зарубежному видеосерверу тоже идёт по политике устройства.
+    device_entries | while IFS='|' read -r ipn policy vpn name; do
+        [ "$policy" = vpn-list ] || continue
+        valid_ipv4 "$ipn" && iptables -t nat -A "$CAPTIVE_CHAIN" -s "$ipn" -j RETURN || exit 1
+    done || { captive_off; return 1; }
     iptables -t nat -A $CAPTIVE_CHAIN -p tcp -m set ! --match-set $SET dst -j DNAT --to-destination "$LAN_IP:$STUB_PORT"
     iptables -t nat -C PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN 2>/dev/null \
         || iptables -t nat -I PREROUTING -i $LAN_IF -p tcp --dport 80 -j $CAPTIVE_CHAIN

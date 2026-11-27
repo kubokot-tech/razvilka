@@ -13,7 +13,7 @@ setup_router() {
     sed -e "s|^DIR=/opt/razvilka$|DIR=$T|" -e "s|^LOG=/opt/var/log/razvilka.log$|LOG=$T/razvilka.log|" \
         -e "s|/sys/class/net/|$T/sys/class/net/|g" "$ROOT/src/razvilka.sh" > "$T/razvilka.sh"
     echo 'default via 192.0.2.1 dev eth3' > "$T/wan-defaults"
-    : > "$T/rules"; : > "$T/routes1022"; : > "$T/routes1020"; : > "$T/routes1019"; for n in 1030 1031 1032 1033 1034 1035 1036; do : > "$T/routes$n"; done
+    : > "$T/rules"; : > "$T/routes1022"; : > "$T/routes1020"; : > "$T/routes1019"; for n in 1030 1031 1032 1033 1034 1035 1036 1037 1038; do : > "$T/routes$n"; done
     echo kill > "$T/failmode"
     echo '81.0.0.0/8' > "$T/ru.cidr"
     echo 'VPN_SERVERS_EXTRA="198.51.100.1"' > "$T/razvilka.conf"
@@ -533,6 +533,115 @@ multi_vpn_policies_fail_closed() {
     awk '/^30016:.*from 192.168.1.80 .*lookup 1031/{found=1} END{exit !found}' "$T/rules"
 }
 
+vpn_list_device_routing() {
+    set -e
+    setup_router vpn-list
+    : > "$T/kill-allow.presets"
+    printf '%s\n' 'ISP_IF="ppp0"' 'VPN2_IF="nwg1"' >> "$T/razvilka.conf"
+    echo 'default dev ppp0 scope link metric 1000' > "$T/wan-defaults"
+    touch "$T/vpn-present" "$T/vpn2-present"
+    mkdir -p "$T/asn"
+    echo '142.250.0.0/16' > "$T/asn/AS15169.cidr"
+    printf '%s\n' 'as15169 # Google' 'video.example' '198.51.100.0/24' '192.168.1.42/32' > "$T/lists/vpn.list"
+    echo '198.51.100.0/24' > "$T/lists/direct.list"
+    router device-set 192.168.1.60 vpn-list primary TV
+    router device-set 192.168.1.61 vpn-list secondary Laptop
+    grep -Fxq '30016: from 192.168.1.60 lookup 1037' "$T/rules"
+    grep -Fxq '30016: from 192.168.1.61 lookup 1038' "$T/rules"
+    for table in 1037 1038; do
+        dev=opkgtun0; [ "$table" = 1037 ] || dev=nwg1
+        grep -Fxq 'default dev ppp0 metric 10' "$T/routes$table"
+        grep -Fxq 'throw 192.168.0.0/16' "$T/routes$table"
+        refute grep -Fq '192.168.1.42' "$T/routes$table"
+        for dest in 142.250.0.0/16 203.0.113.10 198.51.100.0/24; do
+            grep -Fxq "prohibit $dest metric 100" "$T/routes$table"
+            grep -Fxq "$dest dev $dev metric 10" "$T/routes$table"
+        done
+    done
+    [ ! -s "$T/vpn.missing" ]
+    : > "$T/conntrack.calls"
+    router watchdog
+    [ ! -s "$T/conntrack.calls" ]
+
+    # The kernel removes interface routes immediately. The guard must predate the watchdog.
+    rm "$T/vpn2-present"
+    awk '!/dev nwg1/' "$T/routes1038" > "$T/remaining"; mv "$T/remaining" "$T/routes1038"
+    grep -Fxq 'prohibit 142.250.0.0/16 metric 100' "$T/routes1038"
+    router watchdog
+    grep -Fxq 'default dev ppp0 metric 10' "$T/routes1038"
+    refute grep -Fq 'dev opkgtun0' "$T/routes1038"
+    grep -Fxq '142.250.0.0/16 dev opkgtun0 metric 10' "$T/routes1037"
+    touch "$T/vpn2-present"
+    router watchdog
+    grep -Fxq '142.250.0.0/16 dev nwg1 metric 10' "$T/routes1038"
+
+    # Hourly refresh works with the global scheme switched off. Drop removed entries even offline.
+    export DIG_FAIL=1
+    printf '%s\n' 'video.example' 'unresolved.example' > "$T/lists/vpn.list"
+    router lists
+    grep -Fxq 'unresolved.example' "$T/vpn.missing"
+    grep -Fxq '203.0.113.10 dev nwg1 metric 10' "$T/routes1038"
+    grep -Fxq 'default dev ppp0 metric 10' "$T/routes1038"
+    refute grep -Fq '142.250.0.0' "$T/routes1038"
+    unset DIG_FAIL
+    DIG_IP=203.0.113.11
+    router lists
+    [ ! -s "$T/vpn.missing" ]
+    grep -Fxq '203.0.113.11 dev nwg1 metric 10' "$T/routes1038"
+    refute grep -Fq '203.0.113.10' "$T/routes1038"
+    : > "$T/lists/vpn.list"
+    router lists
+    refute grep -Eq 'dev (opkgtun0|nwg1)|prohibit [0-9]' "$T/routes1037" "$T/routes1038"
+    grep -Fxq 'default dev ppp0 metric 10' "$T/routes1037"
+    router device-del 192.168.1.61
+    [ ! -s "$T/routes1038" ]
+    refute grep -Fq 'lookup 1038' "$T/rules"
+}
+
+vpn_list_during_global_kill() {
+    set -e
+    setup_router vpn-list-kill
+    echo 'CAPTIVE_STUB=1' >> "$T/razvilka.conf"
+    awk 'BEGIN {for (i=0;i<1024;i++) print "81." int(i/256) "." i%256 ".0/24"}' > "$T/ru.cidr"
+    iptables() {
+        echo "$*" >> "$T/iptables.calls"
+        case "$*" in *" -C "*) return 1 ;; esac
+        return 0
+    }
+    echo '203.0.113.10' > "$T/lists/vpn.list"
+    router start
+    [ -f "$T/kill_active" ]
+    : > "$T/iptables.calls"
+    router device-set 192.168.1.60 vpn-list primary TV
+    grep -Fxq 'prohibit 203.0.113.10 metric 100' "$T/routes1037"
+    grep -Fxq 'default via 192.0.2.1 dev eth3 metric 10' "$T/routes1037"
+    awk '/-s 192.168.1.60 -j RETURN/{exempt=NR} /-j DNAT/{redirect=NR} END{exit !(exempt && redirect>exempt)}' "$T/iptables.calls"
+    : > "$T/iptables.calls"
+    router device-del 192.168.1.60
+    refute grep -Fq '192.168.1.60 -j RETURN' "$T/iptables.calls"
+    grep -Fq -- '-j DNAT' "$T/iptables.calls"
+}
+
+vpn_list_recovers_from_partial_batch() {
+    set -e
+    setup_router vpn-list-partial
+    touch "$T/vpn-present"
+    echo '198.51.100.0/24' > "$T/lists/vpn.list"
+    router device-set 192.168.1.60 vpn-list primary TV
+    echo '203.0.113.10/32' >> "$T/lists/vpn.list"
+    echo devices.1037.batch > "$T/fail-batch"; echo 2 > "$T/fail-after"
+    source_router device-apply
+    [ "$RC" -ne 0 ]
+    grep -Fxq '30016: from 192.168.1.60 lookup 1037' "$T/rules"
+    grep -Fxq 'prohibit default metric 100' "$T/routes1037"
+    grep -Fxq 'throw 192.168.0.0/16' "$T/routes1037"
+    refute grep -Fq 'dev eth3' "$T/routes1037"
+    rm "$T/fail-batch"
+    router watchdog
+    grep -Fxq '203.0.113.10 dev opkgtun0 metric 10' "$T/routes1037"
+    grep -Fxq 'default via 192.0.2.1 dev eth3 metric 10' "$T/routes1037"
+}
+
 ipv6_block_lifecycle_and_watchdog() {
     set -e
     setup_router ipv6-block
@@ -569,6 +678,7 @@ backup_restore_roundtrip_and_validation() {
     setup_router backup-roundtrip
     : > "$T/vpn-present"
     echo '192.168.1.50|vpn-all|primary|Рабочий Mac' > "$T/devices.conf"
+    echo '192.168.1.60|vpn-list|primary|TV' >> "$T/devices.conf"
     mkdir -p "$T/lists"; echo 'example.com' > "$T/lists/direct.list"; echo 'chatgpt.com' > "$T/lists/vpn.list"
     echo 'admin:secret' > "$T/web.users"; echo 'token123' > "$T/csrf.token"; echo 'Контакт' > "$T/contact.txt"
     : > "$T/enabled"; : > "$T/ai_protect"; : > "$T/ipv6_block"
@@ -584,6 +694,7 @@ backup_restore_roundtrip_and_validation() {
     awk '/^30022:.*lookup 1022$/{found=1} END{exit !found}' "$T/rules"
     refute awk '/nwg9/{found=1} END{exit !found}' "$T/razvilka.conf"
     awk '/vpn-all/{found=1} END{exit !found}' "$T/devices.conf"
+    grep -Fxq '30016: from 192.168.1.60 lookup 1037' "$T/rules"
     [ -f "$T/ai_protect" ]
     [ -f "$T/ipv6_block" ]
     grep -q '^30017:.*lookup 1019' "$T/rules"
@@ -666,6 +777,9 @@ run_test 'device failures preserve LAN routes and previous policy' device_failur
 run_test 'invalid devices.conf preserves kernel state' invalid_devices_file_preserves_kernel_state
 run_test 'backend return codes cover update restart and allow' backend_return_codes_cover_update_restart_and_allow
 run_test 'multi-VPN policies block equally when selected VPN fails' multi_vpn_policies_fail_closed
+run_test 'list-only VPN devices use the selected tunnel and a direct PPPoE default' vpn_list_device_routing
+run_test 'list-only VPN devices keep direct HTTP during the global kill switch' vpn_list_during_global_kill
+run_test 'list-only VPN devices recover safely from a partial route update' vpn_list_recovers_from_partial_batch
 run_test 'IPv6 block lifecycle and watchdog are correct' ipv6_block_lifecycle_and_watchdog
 run_test 'backup and restore roundtrip with archive validation' backup_restore_roundtrip_and_validation
 run_test 'neighbors are sanitized and deduplicated' neighbors_are_sanitized_and_deduplicated

@@ -22,7 +22,7 @@ devices_validate() {
         NF != 3 && NF != 4 && NF != 5 { exit 1 }
         $1 !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { exit 1 }
         { split($1,o,"."); for (i=1;i<=4;i++) if (o[i] < 0 || o[i] > 255) exit 1 }
-        $2 != "direct" && $2 != "vpn" && $2 != "vpn-all" { exit 1 }
+        $2 !~ /^(direct|vpn|vpn-all|vpn-list)$/ { exit 1 }
         NF >= 4 && $3 != "primary" && $3 != "secondary" { exit 1 }
         seen[$1]++ { exit 1 }
     ' "$DEVICES_FILE"
@@ -34,6 +34,8 @@ device_table_for() {
         vpn:secondary) echo "$DEV_VPN2_TABLE" ;;
         vpn-all:primary) echo "$DEV_ALL_TABLE" ;;
         vpn-all:secondary) echo "$DEV_ALL2_TABLE" ;;
+        vpn-list:primary) echo "$DEV_LIST_TABLE" ;;
+        vpn-list:secondary) echo "$DEV_LIST2_TABLE" ;;
     esac
 }
 device_table_spec() {
@@ -51,6 +53,67 @@ device_if_vars() {
         echo "$VPN_IF|$VPN_SERVERS_EXTRA|$VPN_PROCESS"
     fi
 }
+
+# У каждого префикса есть постоянный prohibit: при удалении VPN-интерфейса
+# ядро снимает маршрут через туннель, но не может перейти на WAN по умолчанию.
+device_list_table() (
+    table=$1; iface=$2; live=$3; wan=$4; failed=0
+    batch=$DIR/devices.$table.batch
+    source_file=$VPN_LIST; [ -f "$source_file" ] || source_file=/dev/null
+    source_sum=$(sha256sum < "$source_file") || exit 1
+    if [ ! -f "$DIR/vpn.resolved" ] || [ "$source_sum" != "$(cat "$DIR/vpn.source.sum" 2>/dev/null)" ]; then
+        refresh_vpn_list || exit 1
+    fi
+    desired=$(
+        echo "prohibit default metric 100"
+        for p in $PRIVATE; do echo "throw $p"; done
+        awk -v private="$PRIVATE" -v iface="$iface" -v live="$live" '
+            function number(ip, a) { split(ip,a,"."); return ((a[1]*256+a[2])*256+a[3])*256+a[4] }
+            function routes(p) {
+                print "prohibit " p " metric 100"
+                if (live && iface != "") print p " dev " iface " metric 10"
+            }
+            BEGIN {
+                n=split(private,nets,/[[:space:]]+/)
+                for(i=1;i<=n;i++) { split(nets[i],a,"/"); base[i]=number(a[1]); size[i]=2^(32-a[2]) }
+            }
+            NF {
+                split($1,a,"/"); ip=number(a[1]); span=2^(32-(a[2]=="" ? 32 : a[2]))
+                for(i=1;i<=n;i++) if(span<=size[i] && ip>=base[i] && ip<base[i]+size[i]) next
+                if(span==2^32) { routes("0.0.0.0/1"); routes("128.0.0.0/1"); next }
+                sub(/\/32$/, "", $1); routes($1)
+            }' "$DIR/vpn.resolved" || exit 1
+        if [ -n "$wan" ]; then echo "default $wan metric 10"; fi
+    ) || exit 1
+
+    current=$(table_routes "$table") || exit 1
+    # ip route show добавляет scope, proto и src; сравниваем только поля нашей политики.
+    if { printf '%s\n' "$desired"; echo "==="; printf '%s\n' "$current"; } | awk '
+        $0=="===" { actual=1; next }
+        !actual { want[$0]=1; next }
+        NF {
+            route=$1; if ($1=="prohibit" || $1=="throw") route=route " " $2
+            sub(/\/32$/, "", route)
+            for(i=2;i<NF;i++) if ($i=="via" || $i=="dev" || $i=="metric") route=route " " $i " " $(i+1)
+            if (!(route in want)) extra=1
+            delete want[route]
+        }
+        END { for (r in want) exit 1; exit extra+0 }
+    '; then exit 0; fi
+    printf '%s\n' "$desired" | awk -v t="$table" '{print "route replace " $0 " table " t}' > "$batch" || exit 1
+    if ! reconcile_routes "$batch" "$table" 'устройства: ошибка применения списка VPN'; then
+        ip route replace prohibit default metric 10 table "$table" || exit 1
+        device_repair_table "$table" "" || exit 1
+        failed=1
+    fi
+    # После смены маршрутов старые соединения этого устройства могли остаться в FASTNAT.
+    device_entries | while IFS='|' read -r ipn policy vpn name; do
+        [ "$policy" = vpn-list ] && [ "$(device_table_for "$policy" "$vpn")" = "$table" ] || continue
+        if command -v conntrack >/dev/null 2>&1; then conntrack -D -s "$ipn" >/dev/null 2>&1 || :; fi
+    done
+    [ "$failed" = 0 ]
+)
+
 device_build_table() {
     t=$1; primary_ok=$2; secondary_ok=$3
     wan_route=$4
@@ -148,9 +211,16 @@ device_apply() {
     want="$(isp_route_state "$wan_route") primary_ok=$primary_ok secondary_ok=$secondary_ok servers=$(echo $(vpn_servers)) servers2=$(echo $(vpn_servers "$VPN2_IF" "$VPN2_SERVERS_EXTRA" "$VPN2_PROCESS")) ru=$(date -r "$RU_LIST" +%s 2>/dev/null) devices=$(date -r "$DEVICES_FILE" +%s 2>/dev/null)"
     rebuild=0
     [ "$want" = "$(cat "$DIR/devices.state" 2>/dev/null)" ] || rebuild=1
-    for t in $needed; do device_tables_ok "$t" "$primary_ok" "$secondary_ok" "$wan_route" || rebuild=1; done
+    other_tables=
+    for t in $needed; do
+        case "$t" in
+            "$DEV_LIST_TABLE") device_list_table "$t" "$VPN_IF" "$primary_ok" "$wan_route" || return 1 ;;
+            "$DEV_LIST2_TABLE") device_list_table "$t" "$VPN2_IF" "$secondary_ok" "$wan_route" || return 1 ;;
+            *) other_tables="$other_tables $t"; device_tables_ok "$t" "$primary_ok" "$secondary_ok" "$wan_route" || rebuild=1 ;;
+        esac
+    done
     if [ "$rebuild" = 1 ]; then
-        for t in $needed; do
+        for t in $other_tables; do
             if ! device_build_table "$t" "$primary_ok" "$secondary_ok" "$wan_route"; then
                 device_repair_table "$t" "$wan_route" || return 1
                 [ -n "$(device_table_spec "$t")" ] || return 1
@@ -189,6 +259,10 @@ device_commit() (
     previous_file=$DEVICES_FILE
     DEVICES_FILE=$1
     if device_apply && mv "$1" "$previous_file"; then
+        DEVICES_FILE=$previous_file
+        if [ "$CAPTIVE_STUB" = 1 ] && [ -f "$KILL_FLAG" ]; then
+            captive_on || { captive_off; log 'не удалось обновить HTTP-заглушку после изменения правила устройства'; }
+        fi
         flush_flows
         return 0
     fi
@@ -201,7 +275,7 @@ device_set() {
     ipn=$1; policy=$2; a3=${3:-}; a4=${4:-}; a5=${5:-}
     devices_validate || { echo 'devices.conf содержит ошибку, исправьте файл вручную' >&2; return 1; }
     valid_ipv4 "$ipn" || { echo 'некорректный IPv4-адрес устройства' >&2; return 1; }
-    case "$policy" in default|direct|vpn|vpn-all) ;; *) echo 'политика: default|direct|vpn|vpn-all' >&2; return 1 ;; esac
+    case "$policy" in default|direct|vpn|vpn-all|vpn-list) ;; *) echo 'политика: default|direct|vpn|vpn-all|vpn-list' >&2; return 1 ;; esac
     case "$a3" in
         primary|secondary)
             vpn=$a3
