@@ -90,7 +90,13 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 default_route_ifaces() { awk 'NR>1 && $2=="00000000" && $8=="00000000" {print $1}' /proc/net/route; }
 iface_gw() {  # шлюз интерфейса из /proc/net/route (hex little-endian -> a.b.c.d)
-    awk -v i="$1" 'NR>1 && $1==i && $2=="00000000" && $8=="00000000" {g=$3; printf "%d.%d.%d.%d\n", "0x" substr(g,7,2), "0x" substr(g,5,2), "0x" substr(g,3,2), "0x" substr(g,1,2); exit}' /proc/net/route
+    awk -v iface="$1" '
+        function digit(pos) { return index("0123456789ABCDEF", toupper(substr($3, pos, 1))) - 1 }
+        function octet(pos) { return 16 * digit(pos) + digit(pos + 1) }
+        NR > 1 && $1 == iface && $2 == "00000000" && $8 == "00000000" {
+            printf "%d.%d.%d.%d\n", octet(7), octet(5), octet(3), octet(1)
+            exit
+        }' /proc/net/route
 }
 vpn_candidates() { ls /sys/class/net 2>/dev/null | grep -E '^(opkgtun|nwg|wg|awg|tun|ovpn)[0-9]+$'; }
 iface_ok() { ping -I "$1" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -I "$1" -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; }
